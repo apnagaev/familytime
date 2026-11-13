@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Компьютеры</h1>
+{% for d in devices %}
+<div class="card">
+  <div class="spread">
+    <h2>{{ d.hostname.split('.')[0] }} <span class="muted small">{{ d.hostname }}</span></h2>
+    {% if d.lost %}<span class="pill bad">потерян</span>{% elif d.mode == 'track' %}<span class="pill free">только локация</span>{% else %}<span class="pill">контроль времени</span>{% endif %}
+  </div>
+  <div class="small">
+    {% if d.last_seen %}
+      {% set ago = (now - d.last_seen).total_seconds() %}
+      Связь: {% if ago < 180 %}<b>на связи</b>{% else %}{{ fmt(ago) }} назад{% endif %}
+      {% if d.last_user %} · {{ d.last_user }}{% if d.last_session == 'locked' %} (заблокирован){% endif %}{% endif %}
+      {% if d.battery is not none %} · 🔋 {{ d.battery }}%{% if d.on_ac %} ⚡{% endif %}{% endif %}
+    {% else %}Ещё не выходил на связь{% endif %}<br>
+    {% if d.last_fix_at %}Место: <a href="https://yandex.ru/maps/?pt={{ d.last_lon }},{{ d.last_lat }}&z=16&l=map" target="_blank" rel="noopener">{{ '%.5f'|format(d.last_lat) }}, {{ '%.5f'|format(d.last_lon) }}</a> ±{{ d.last_accuracy|int }} м ({{ fmt((now - d.last_fix_at).total_seconds()) }} назад, {{ d.last_fix_source }}){% if cfg.traccar_web_url %} · <a href="{{ cfg.traccar_web_url }}" target="_blank" rel="noopener">Traccar</a>{% endif %}<br>{% endif %}
+    <span class="muted">Агент {{ d.agent_version or '?' }} · {{ d.os_version or '' }} · IP {{ d.last_ip or '' }}</span>
+  </div>
+  <form method="post" action="/devices/{{ d.id }}" style="margin-top: 10px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <div class="row">
+      <select name="mode">
+        <option value="control" {{ 'selected' if d.mode == 'control' }}>контроль времени и локация</option>
+        <option value="track" {{ 'selected' if d.mode == 'track' }}>только локация (взрослые)</option>
+      </select>
+      <label><input type="checkbox" name="lost" value="1" {{ 'checked' if d.lost }}> потерян</label>
+      <label><input type="checkbox" name="lost_lock" value="1" {{ 'checked' if d.lost_lock }}> блокировать вход</label>
+    </div>
+    <label class="block small">Сообщение на экране, если потерян (пусто — из настроек)</label>
+    <textarea name="lost_message" style="min-height: 50px">{{ d.lost_message }}</textarea>
+    <div class="row"><button>Сохранить</button></div>
+  </form>
+  <form method="post" action="/devices/{{ d.id }}/delete" onsubmit="return confirm('Удалить компьютер из списка?')" style="margin-top: 8px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="danger">Удалить</button>
+  </form>
+</div>
+{% else %}
+<div class="card muted">Компьютеров пока нет. Установите агент — компьютер появится здесь после первого выхода на связь.</div>
+{% endfor %}
+<p class="hint">«Потерян»: локация отправляется чаще, на экране висит сообщение. «Блокировать вход» дополнительно сразу завершает любой сеанс на этом компьютере.</p>
+{% endblock %}

@@ -1,0 +1,46 @@
+{% macro status_pill(st) -%}
+  {%- if st.mode == 'restricted' and st.reason == 'window' -%}<span class="pill warn">только учёба: вне свободного времени</span>
+  {%- elif st.mode == 'restricted' -%}<span class="pill bad">время закончилось, только учёба</span>
+  {%- elif st.limit_seconds is none -%}<span class="pill">без лимита</span>
+  {%- else -%}<span class="pill">можно</span>{%- endif -%}
+{%- endmacro %}
+
+{% macro meter(st, pct) -%}
+  <div class="meter {{ 'bad' if pct >= 100 else ('warn' if pct >= 80 else '') }}"><i style="width: {{ pct }}%"></i></div>
+{%- endmacro %}
+
+{% macro history(hist, peak) -%}
+  <div class="bars" role="img" aria-label="Время по дням за две недели">
+    {% for d in hist %}
+    <div class="b" title="{{ d.day.strftime('%d.%m') }}: {{ fmt(d.counted) }}, учёба {{ fmt(d.free) }}">
+      <i class="c" style="height: {{ (100 * d.counted / peak)|round(1) }}%"></i>
+      <i class="f" style="height: {{ (100 * d.free / peak)|round(1) }}%"></i>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="bars-x">{% for d in hist %}<span>{{ WEEKDAYS_SHORT[d.day.weekday()] if loop.length <= 14 else '' }}</span>{% endfor %}</div>
+  <div class="legend"><span><i style="background: var(--accent)"></i>в счёт лимита</span><span><i style="background: var(--free)"></i>учёба, не считается</span></div>
+{%- endmacro %}
+
+{% macro activity(rows) -%}
+  {% if rows %}
+  <table>
+    <tr><th>Что</th><th class="num">Всего</th><th class="num">Учёба</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td title="{{ r.name }}">{% if r.kind == 'site' %}🌐{% else %}🖥{% endif %} {{ r.label }}</td>
+      <td class="num">{{ fmt(r.total) }}</td>
+      <td class="num">{% if r.free %}<span class="pill free">{{ fmt(r.free) }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Пока ничего</p>{% endif %}
+{%- endmacro %}
+
+{% macro presence_line(presence) -%}
+  {% if presence %}
+    {% for p in presence %}
+      <div class="small">🟢 {{ p.hostname.split('.')[0] }}{% if p.session == 'locked' %} (заблокирован){% endif %}{% if p.domain %} · {{ p.domain }}{% elif p.app %} · {{ p.app }}{% elif p.exe %} · {{ p.exe }}{% endif %}</div>
+    {% endfor %}
+  {% else %}<div class="small muted">Сейчас не за компьютером</div>{% endif %}
+{%- endmacro %}

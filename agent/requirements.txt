@@ -1,0 +1,5 @@
+pywin32>=308
+psutil>=6.0
+uiautomation>=2.0.20
+comtypes>=1.4
+pyinstaller>=6.10

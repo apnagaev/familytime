@@ -1,0 +1,8 @@
+- name: Ждём готовности FamilyTime на узле
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ familytime_port }}/health"
+    return_content: true
+  register: ft_health
+  until: ft_health.status == 200 and (ft_health.json.ok | default(false))
+  retries: 30
+  delay: 3

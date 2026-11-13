@@ -1,0 +1,33 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+# Порт FamilyTime открыт только reverse proxy, узлам кластера, Docker-сетям и localhost.
+# Фильтр в prerouting до DNAT Docker: виден настоящий порт и адрес клиента.
+# Применять только так: nft -f /etc/nftables.d/familytime.nft (не systemctl restart nftables).
+
+table inet familytime
+delete table inet familytime
+
+table inet familytime {
+    set allowed4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = {
+            127.0.0.0/8,
+            172.16.0.0/12,
+{% for ip in familytime_nodes %}
+            {{ ip }},
+{% endfor %}
+{% for n in trusted_nets %}
+            {{ n }},
+{% endfor %}
+        }
+    }
+
+    chain prerouting {
+        type filter hook prerouting priority -150; policy accept;
+        tcp dport {{ familytime_port }} ip saddr @allowed4 accept
+        tcp dport {{ familytime_port }} meta nfproto ipv6 iifname "lo" accept
+        tcp dport {{ familytime_port }} drop
+    }
+}

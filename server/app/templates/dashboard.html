@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+<div class="spread"><h1>Дети</h1>{% if pending %}<a class="btn" href="/requests">Запросы времени: {{ pending }}</a>{% endif %}</div>
+<div class="grid">
+{% for v in rows %}
+  <div class="card">
+    <div class="spread">
+      <h2><a href="/child/{{ v.child.username }}">{{ v.child.display_name }}</a></h2>
+      {% if not v.child.enabled %}<span class="pill warn">контроль выключен</span>{% else %}{{ m.status_pill(v.st) }}{% endif %}
+    </div>
+    <div class="big">{{ fmt(v.st.counted_seconds) }}</div>
+    <div class="muted small">из {{ fmt(v.st.limit_seconds) }}{% if v.st.bonus_minutes %} (с учётом {{ '%+d'|format(v.st.bonus_minutes) }} мин){% endif %} · учёба {{ fmt(v.st.free_seconds) }}</div>
+    {{ m.meter(v.st, v.pct) }}
+    {{ m.presence_line(v.presence) }}
+    <div class="row" style="margin-top: 12px">
+      {% for add in (15, 30, 60) %}
+      <form class="inline" method="post" action="/child/{{ v.child.username }}/bonus">
+        <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="ret" value="/dashboard">
+        <input type="hidden" name="minutes" value="{{ add }}"><button class="ghost">+{{ add }}</button>
+      </form>
+      {% endfor %}
+      {% if v.stop %}
+      <form class="inline" method="post" action="/child/{{ v.child.username }}/bonus/{{ v.stop.id }}/delete">
+        <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="ret" value="/dashboard">
+        <button>Вернуть время ({{ -v.stop.minutes }} мин)</button>
+      </form>
+      {% else %}
+      <form class="inline" method="post" action="/child/{{ v.child.username }}/bonus" onsubmit="return confirm('Закончить время на сегодня? Отменить можно кнопкой «Вернуть время».')">
+        <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="ret" value="/dashboard">
+        <input type="hidden" name="minutes" value="0"><button class="danger">Хватит на сегодня</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+{% endfor %}
+</div>
+
+<div class="card">
+  <h2>Добавить ребёнка</h2>
+  <form method="post" action="/children" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <input type="text" name="username" placeholder="логин в AD, например ivan" required>
+    <input type="text" name="display_name" placeholder="имя для сообщений: Ваня">
+    <button>Добавить</button>
+  </form>
+  <p class="hint">Логин — как при входе в Windows (sAMAccountName), без домена. Контроль включается только для учётных записей из этого списка, взрослые на тех же компьютерах не считаются.</p>
+</div>
+{% endblock %}

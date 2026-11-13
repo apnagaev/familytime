@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Запросы времени</h1>
+<div class="card scroll">
+{% if rows %}
+<table>
+  <tr><th>Когда</th><th>Кто</th><th>Сколько</th><th>Зачем</th><th></th></tr>
+  {% for r in rows %}
+  <tr>
+    <td class="small">{{ r.created_at.astimezone(cfg.tz).strftime('%d.%m %H:%M') }}</td>
+    <td>{{ r.display_name }}</td>
+    <td>{{ r.minutes }} мин</td>
+    <td class="small">{{ r.reason }}</td>
+    <td>
+      {% if r.status == 'pending' %}
+      <form class="inline" method="post" action="/requests/{{ r.id }}"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="action" value="approve"><button>Дать</button></form>
+      <form class="inline" method="post" action="/requests/{{ r.id }}"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="action" value="deny"><button class="ghost">Отказать</button></form>
+      {% elif r.status == 'approved' %}<span class="pill">дано</span> <span class="muted small">{{ r.decided_by }}</span>
+      {% else %}<span class="pill bad">отказано</span> <span class="muted small">{{ r.decided_by }}</span>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<p class="muted">Запросов не было</p>{% endif %}
+</div>
+{% endblock %}

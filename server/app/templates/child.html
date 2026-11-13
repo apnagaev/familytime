@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="spread"><h1>{{ child.display_name }} <span class="muted small">{{ child.username }}</span></h1></div>
+{% include "_stats.html" %}
+
+<div class="card">
+  <h2>Время сегодня</h2>
+  <form method="post" action="/child/{{ child.username }}/bonus" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <input type="number" name="minutes" value="30" step="5" min="-1440" max="1440"> мин
+    <input type="text" name="reason" placeholder="за что (необязательно)" style="flex: 1; min-width: 160px">
+    <button>Добавить</button>
+  </form>
+  <p class="hint">Отрицательное число — убрать время. Действует только сегодня.</p>
+</div>
+
+<div class="card">
+  <h2>Правила по дням</h2>
+  <form method="post" action="/child/{{ child.username }}/rules">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <div class="scroll"><table>
+      <tr><th>День</th><th>Лимит, мин</th><th>Свободное время с</th><th>до</th></tr>
+      {% for wd in range(7) %}{% set r = st.rules[wd] %}
+      <tr>
+        <td>{{ WEEKDAYS[wd] }}</td>
+        <td><input type="number" name="limit{{ wd }}" value="{{ r.limit_minutes if r.limit_minutes is not none else '' }}" min="0" max="1440" placeholder="∞"></td>
+        <td><input type="time" name="from{{ wd }}" value="{{ fmt_time(r.window_from) }}"></td>
+        <td><input type="time" name="to{{ wd }}" value="{{ fmt_time(r.window_to) }}"></td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    <p class="hint">Пустой лимит — без ограничения, 0 — только учёба. Вне свободного времени компьютер работает только для учёбы. Пустые «с/до» — без ограничения по часам; если «до» меньше «с», окно переходит через полночь.</p>
+    <button>Сохранить</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Учётная запись</h2>
+  <form method="post" action="/child/{{ child.username }}/settings" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <input type="text" name="display_name" value="{{ child.display_name }}">
+    <label><input type="checkbox" name="enabled" value="1" {{ 'checked' if child.enabled }}> контроль включён</label>
+    <button>Сохранить</button>
+  </form>
+  <form method="post" action="/child/{{ child.username }}/delete" onsubmit="return confirm('Удалить вместе со статистикой?')" style="margin-top: 12px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="danger">Удалить</button>
+  </form>
+</div>
+{% endblock %}

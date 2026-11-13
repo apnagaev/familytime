@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Время за компьютером{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">⏱ Время за компьютером</a>
+  {% if user %}
+  <nav>
+    {% if user.parent %}
+      <a href="/dashboard" class="{{ 'on' if request.url.path.startswith('/dashboard') or request.url.path.startswith('/child') }}">Дети</a>
+      <a href="/requests" class="{{ 'on' if request.url.path.startswith('/requests') }}">Запросы</a>
+      <a href="/devices" class="{{ 'on' if request.url.path.startswith('/devices') }}">Компьютеры</a>
+      <a href="/settings" class="{{ 'on' if request.url.path.startswith('/settings') }}">Настройки</a>
+    {% else %}
+      <a href="/me" class="on">Моё время</a>
+    {% endif %}
+  </nav>
+  <span class="who">{{ user.name }} · <a href="/logout">выйти</a></span>
+  {% endif %}
+</header>
+<main>
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+{% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>
