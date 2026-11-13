@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Привет, {{ child.display_name }}!</h1>
+{% include "_stats.html" %}
+<div class="card">
+  <h2>Попросить ещё времени</h2>
+  <form method="post" action="/me/request" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <select name="minutes">{% for x in (15, 30, 45, 60) %}<option value="{{ x }}">{{ x }} мин</option>{% endfor %}</select>
+    <input type="text" name="reason" placeholder="зачем (необязательно)" maxlength="300" style="flex: 1; min-width: 180px">
+    <button>Отправить</button>
+  </form>
+  {% if reqs %}
+  <table style="margin-top: 12px">
+    {% for r in reqs %}
+    <tr><td class="small">{{ r.created_at.astimezone(now.tzinfo).strftime('%d.%m %H:%M') }}</td><td>{{ r.minutes }} мин</td>
+      <td>{% if r.status == 'pending' %}<span class="pill warn">ждёт ответа</span>{% elif r.status == 'approved' %}<span class="pill">дали</span>{% else %}<span class="pill bad">отказали</span>{% endif %}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+<div class="card small muted">
+  Учебные сайты и программы не тратят время. Когда время закончится, они продолжат работать, а остальное закроется.
+</div>
+{% endblock %}

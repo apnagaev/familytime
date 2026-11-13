@@ -1,0 +1,149 @@
+# Развёртывание сервера FamilyTime на узлах группы docker, строго по одному узлу.
+#   ansible-playbook -i inventory.yml install_familytime.yaml --ask-vault-pass
+- name: FamilyTime
+  hosts: docker
+  serial: 1
+  become: true
+  vars:
+    familytime_version: "1.1.1"
+    familytime_dir: /docker-compose/familytime
+    familytime_port: 8097
+    familytime_subnet: 172.30.0.0/28
+    familytime_timezone: Europe/Moscow
+    familytime_oidc_client_id: familytime
+    familytime_oidc_client_secret: ""
+    familytime_oidc_parent_role: familytime-parent
+    familytime_oidc_username_claim: preferred_username
+    familytime_yandex_locator_keys: ""
+    familytime_traccar_osmand_url: ""
+    familytime_traccar_api_url: ""
+    familytime_traccar_token: ""
+    familytime_traccar_group_id: ""
+    familytime_traccar_web_url: ""
+    familytime_telegram_token: ""
+    familytime_telegram_chat_ids: ""
+    familytime_extra_allowed_domains: ""
+    firewall: true
+    # адреса узлов и vIP балансировщика: им открыт порт; по умолчанию — ansible_host узлов группы
+    familytime_nodes: "{{ groups['docker'] | map('extract', hostvars) | selectattr('ansible_host', 'defined') | map(attribute='ansible_host') | list }}"
+    trusted_nets: []
+  vars_files:
+    - vars/familytime.yml
+
+  tasks:
+    - name: Обязательные переменные заданы
+      ansible.builtin.assert:
+        that:
+          - familytime_public_url | length > 0
+          - familytime_database_url | length > 0
+          - familytime_session_secret | length >= 32
+          - familytime_enroll_secret | length >= 16
+          - familytime_oidc_issuer | length > 0
+        fail_msg: "Заполните vars/familytime.yml (public_url, database_url, секреты, oidc_issuer)"
+        quiet: true
+
+    - name: Адреса узлов для firewall известны
+      ansible.builtin.assert:
+        that: familytime_nodes | length > 0
+        fail_msg: "Задайте familytime_nodes в vars/familytime.yml: IP узлов и vIP балансировщика"
+        quiet: true
+      when: firewall | bool
+
+    # ---------- firewall ----------
+    - name: nftables установлен
+      ansible.builtin.apt:
+        name: nftables
+        state: present
+      when: firewall | bool
+
+    - name: Каталог правил nftables
+      ansible.builtin.file:
+        path: /etc/nftables.d
+        state: directory
+        mode: "0755"
+      when: firewall | bool
+
+    - name: Правила nftables
+      ansible.builtin.template:
+        src: files/familytime/familytime.nft.j2
+        dest: /etc/nftables.d/familytime.nft
+        mode: "0644"
+        validate: nft -c -f %s
+      register: ft_nft
+      when: firewall | bool
+
+    - name: Применить правила nftables
+      ansible.builtin.command: nft -f /etc/nftables.d/familytime.nft
+      when: firewall | bool and ft_nft.changed
+
+    - name: Подключены ли правила из /etc/nftables.d при загрузке
+      ansible.builtin.command: grep -q 'nftables.d' /etc/nftables.conf
+      register: ft_nft_inc
+      changed_when: false
+      failed_when: false
+      when: firewall | bool
+
+    - name: Подключить /etc/nftables.d при загрузке
+      ansible.builtin.lineinfile:
+        path: /etc/nftables.conf
+        line: include "/etc/nftables.d/*.nft"
+        create: true
+        mode: "0755"
+      when: firewall | bool and ft_nft_inc.rc != 0
+
+    # ---------- файлы ----------
+    - name: Каталог сервиса
+      ansible.builtin.file:
+        path: "{{ familytime_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Исходники сервера
+      ansible.builtin.copy:
+        src: server/
+        dest: "{{ familytime_dir }}/server/"
+        mode: preserve
+      register: ft_src
+
+    - name: docker-compose.yaml
+      ansible.builtin.template:
+        src: files/familytime/familytime.yaml.j2
+        dest: "{{ familytime_dir }}/docker-compose.yaml"
+        mode: "0644"
+      register: ft_compose
+
+    - name: familytime.env (секреты)
+      ansible.builtin.template:
+        src: files/familytime/familytime.env.j2
+        dest: "{{ familytime_dir }}/familytime.env"
+        mode: "0600"
+      register: ft_env
+      no_log: true
+
+    # ---------- запуск ----------
+    - name: Собрать образ
+      ansible.builtin.command: docker compose build --pull
+      args:
+        chdir: "{{ familytime_dir }}"
+      when: ft_src.changed or ft_compose.changed
+      changed_when: true
+
+    - name: Запустить (пересоздаётся, только если что-то изменилось)
+      ansible.builtin.command: docker compose up -d --remove-orphans
+      args:
+        chdir: "{{ familytime_dir }}"
+      register: ft_up
+      changed_when: "'Started' in ft_up.stderr or 'Recreated' in ft_up.stderr"
+
+    - name: Перезапуск при смене секретов
+      ansible.builtin.command: docker compose up -d --force-recreate familytime
+      args:
+        chdir: "{{ familytime_dir }}"
+      when: ft_env.changed and not ft_up.changed
+
+    - name: Проверка узла
+      ansible.builtin.include_tasks: tasks/familytime-healthcheck.yaml
+
+    - name: Удалить неиспользуемые образы (тома не трогаем)
+      ansible.builtin.command: docker image prune -f
+      changed_when: false

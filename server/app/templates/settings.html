@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Настройки</h1>
+
+<div class="card">
+  <h2>Сообщения</h2>
+  <form method="post" action="/settings">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="messages">
+    <p class="hint">Подстановки: <code>{name}</code> — имя ребёнка, <code>{limit}</code> — лимит на сегодня, <code>{used}</code> — сколько потрачено, <code>{left}</code> — сколько осталось (в предупреждении), <code>{from}</code>, <code>{to}</code> — свободное время.</p>
+    <label class="block">Предупреждение перед концом времени</label>
+    <textarea name="warn" style="min-height: 60px">{{ s.messages.warn }}</textarea>
+    <label class="block">Время закончилось</label>
+    <textarea name="limit">{{ s.messages.limit }}</textarea>
+    <label class="block">Вне свободного времени</label>
+    <textarea name="window">{{ s.messages.window }}</textarea>
+    <label class="block">Компьютер потерян (по умолчанию)</label>
+    <textarea name="lost" style="min-height: 60px">{{ s.messages.lost }}</textarea>
+    <div class="row" style="margin-top: 10px"><button>Сохранить</button></div>
+  </form>
+  <form method="post" action="/settings" style="margin-top: 8px" onsubmit="return confirm('Вернуть тексты по умолчанию?')">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="reset_messages">
+    <button class="ghost">Вернуть тексты по умолчанию</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Учёба и запреты</h2>
+  <p class="hint">Ниже — записи вручную. Подписки на списки по ссылкам — в следующем разделе; итог = ручные записи + все включённые подписки.</p>
+  <form method="post" action="/settings">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="lists">
+    <div class="cols">
+      <div>
+        <label class="block">Учебные сайты <span class="muted small">· всего {{ counts.edu_domains }}</span></label>
+        <textarea name="edu_domains" style="min-height: 200px">{{ s.edu_domains|join('\n') }}</textarea>
+        <p class="hint">По одному на строке, поддомены входят: <code>mos.ru</code> покрывает <code>school.mos.ru</code>. Время на них не считается, в режиме «только учёба» открываются только они и портал.</p>
+      </div>
+      <div>
+        <label class="block">Запрещённые сайты <span class="muted small">· всего {{ counts.blocked_domains }}</span></label>
+        <textarea name="blocked_domains" style="min-height: 200px">{{ s.blocked_domains|join('\n') }}</textarea>
+        <p class="hint">Закрыты всегда, в любом режиме, вместе с поддоменами. Действует на детей, на взрослых — нет. Сайт из этого списка не считается учебным, даже если он есть в учебных.</p>
+      </div>
+      <div>
+        <label class="block">Учебные программы <span class="muted small">· всего {{ counts.edu_apps }}</span></label>
+        <textarea name="edu_apps" style="min-height: 160px">{{ s.edu_apps|join('\n') }}</textarea>
+        <p class="hint">Имя файла программы, например <code>winword.exe</code> (видно во всплывающей подсказке в статистике). Время в них не считается, после лимита они продолжают работать.</p>
+      </div>
+      <div>
+        <label class="block">Запрещённые программы <span class="muted small">· всего {{ counts.blocked_apps }}</span></label>
+        <textarea name="blocked_apps" style="min-height: 160px">{{ s.blocked_apps|join('\n') }}</textarea>
+        <p class="hint">Закрываются сразу после запуска. Сюда — браузеры кроме Chrome, Edge и Яндекса, чтобы учёт сайтов нельзя было обойти.</p>
+      </div>
+      <div>
+        <label class="block">Разрешённые протоколы</label>
+        <textarea name="edu_schemes" style="min-height: 100px">{{ s.edu_schemes|join('\n') }}</textarea>
+        <p class="hint">Ссылки вида <code>telemost://…</code>, которые браузер передаёт программе (кнопка «Открыть в приложении»). Работают и в режиме «только учёба». Пишите только название протокола: <code>telemost</code>. Саму программу добавьте в учебные, иначе её окно закроется.</p>
+      </div>
+      <div>
+        <label class="block">Закрывать в режиме «только учёба», даже без окна</label>
+        <textarea name="restricted_kill" style="min-height: 100px">{{ s.restricted_kill|join('\n') }}</textarea>
+        <p class="hint">Лаунчеры игр, мессенджеры в трее. Программы с окном, не попавшие в учебные, закрываются и так.</p>
+      </div>
+    </div>
+    <button>Сохранить</button>
+  </form>
+  {% if counts.blocked_domains > policy_limit or counts.edu_domains > policy_limit %}
+  <p class="hint" style="margin-top: 12px">Браузеры принимают в политике не больше {{ policy_limit }} адресов. {% if counts.blocked_domains > policy_limit %}Из запрещённых в политику уходят первые {{ policy_limit }} (ручные — первыми), остальные компьютер закрывает сам, когда такой сайт открыт в активной вкладке.{% endif %} {% if counts.edu_domains > policy_limit %}В режиме «только учёба» открываются только первые {{ policy_limit }} учебных сайтов.{% endif %}</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Подписки на списки</h2>
+  <p class="hint">Как в Pi-hole и AdGuard: ссылка на список, который обновляется сам. Понимаются форматы hosts (<code>0.0.0.0 example.com</code>), AdGuard/uBlock (<code>||example.com^</code>) и простой список доменов по строке; для программ — имена <code>.exe</code> по строке. Исключения <code>@@</code>, маски и правила с путями пропускаются: блокируются домены целиком.</p>
+  {% if subs %}
+  <div class="scroll"><table>
+    <tr><th>Список</th><th>Тип</th><th class="num">Записей</th><th>Обновлён</th><th>Каждые, ч</th><th></th></tr>
+    {% for l in subs %}
+    <tr>
+      <td><div>{{ l.name }}</div><div class="small muted" style="word-break: break-all">{{ l.url }}</div>
+        {% if l.error %}<div class="small" style="color: var(--bad)">{{ l.error }}</div>{% endif %}</td>
+      <td class="small">{{ categories[l.category][1] }}{% if not l.enabled %} <span class="pill warn">выключен</span>{% endif %}</td>
+      <td class="num">{{ l.count }}</td>
+      <td class="small">{% if l.last_ok %}{{ l.last_ok.astimezone(cfg.tz).strftime('%d.%m %H:%M') }}{% else %}<span class="muted">ещё нет</span>{% endif %}</td>
+      <td>
+        <form class="inline" method="post" action="/lists/{{ l.id }}"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="action" value="interval">
+          <input type="number" name="interval_hours" value="{{ l.interval_hours }}" min="1" max="720" style="width: 64px"><button class="ghost" style="padding: 4px 8px">✓</button></form>
+      </td>
+      <td style="white-space: nowrap">
+        <form class="inline" method="post" action="/lists/{{ l.id }}"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="action" value="refresh"><button class="ghost" title="Обновить сейчас">↻</button></form>
+        <form class="inline" method="post" action="/lists/{{ l.id }}"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="action" value="{{ 'disable' if l.enabled else 'enable' }}"><button class="ghost">{{ 'Выключить' if l.enabled else 'Включить' }}</button></form>
+        <form class="inline" method="post" action="/lists/{{ l.id }}" onsubmit="return confirm('Удалить подписку?')"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="action" value="delete"><button class="danger">✕</button></form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}<p class="muted">Подписок пока нет.</p>{% endif %}
+  <form method="post" action="/lists" class="row" style="margin-top: 12px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <select name="category">{% for k, v in categories.items() %}<option value="{{ k }}" {{ 'selected' if k == 'blocked_domains' }}>{{ v[1] }}</option>{% endfor %}</select>
+    <input type="text" name="url" placeholder="https://…/list.txt" required style="flex: 2; min-width: 220px">
+    <input type="text" name="name" placeholder="название (необязательно)" style="flex: 1; min-width: 140px">
+    <label class="small">каждые <input type="number" name="interval_hours" value="24" min="1" max="720" style="width: 64px"> ч</label>
+    <button>Добавить</button>
+  </form>
+  <p class="hint">Список загружается сразу после добавления. Изменения доходят до компьютеров в течение минуты после обновления.</p>
+</div>
+
+<div class="card">
+  <h2>Параметры</h2>
+  <form method="post" action="/settings" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="options">
+    <label>Простой, после которого время не идёт, мин <input type="number" name="idle_minutes" value="{{ s.idle_minutes }}" min="0" max="120"></label>
+    <label>Предупреждать за, мин <input type="text" name="warn_minutes" value="{{ s.warn_minutes|join(' ') }}" style="width: 90px"></label>
+    <label>Локация раз в, мин <input type="number" name="interval_minutes" value="{{ s.location.interval_minutes }}" min="1" max="240"></label>
+    <label>…если потерян, мин <input type="number" name="lost_interval_minutes" value="{{ s.location.lost_interval_minutes }}" min="1" max="60"></label>
+    <button>Сохранить</button>
+  </form>
+  <p class="hint">Простой не считается, только если на экране нет полноэкранного окна: фильм или игра на весь экран считаются всегда. 0 — считать всё время, пока компьютер не заблокирован.</p>
+</div>
+{% endblock %}

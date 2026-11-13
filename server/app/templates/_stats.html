@@ -1,0 +1,24 @@
+{% import "_macros.html" as m %}
+<div class="cols">
+  <div class="card">
+    <div class="spread"><h2>Сегодня</h2>{{ m.status_pill(st) }}</div>
+    <div class="big">{{ fmt(st.counted_seconds) }} <span class="muted small">из {{ fmt(st.limit_seconds) }}</span></div>
+    {{ m.meter(st, pct) }}
+    <div class="small">
+      {% if st.remaining_seconds is not none %}Осталось: <b>{{ fmt(st.remaining_seconds) }}</b><br>{% endif %}
+      Учёба (не считается): <b>{{ fmt(st.free_seconds) }}</b><br>
+      {% if st.rule.window_from %}Свободное время: с {{ fmt_time(st.rule.window_from) }} до {{ fmt_time(st.rule.window_to) }}<br>{% endif %}
+      {% for b in bonuses %}<span class="muted">{{ '%+d'|format(b.minutes) }} мин{% if b.reason %} — {{ b.reason }}{% endif %}</span>
+        {% if user.parent %}<form class="inline" method="post" action="/child/{{ child.username }}/bonus/{{ b.id }}/delete"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="ghost" style="padding: 0 8px" title="Отменить">✕</button></form>{% endif %}<br>{% endfor %}
+    </div>
+    <div style="margin-top: 8px">{{ m.presence_line(presence) }}</div>
+  </div>
+  <div class="card">
+    <h2>Две недели</h2>
+    {{ m.history(hist, peak) }}
+  </div>
+</div>
+<div class="cols">
+  <div class="card"><h2>Сегодня: программы и сайты</h2>{{ m.activity(top_day) }}</div>
+  <div class="card"><h2>За 7 дней</h2>{{ m.activity(top_week) }}</div>
+</div>

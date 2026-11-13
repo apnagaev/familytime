@@ -1,0 +1,12 @@
+inventory.yml
+vars/*.yml
+!vars/*.example.yml
+files/familytime/*.env
+*.retry
+__pycache__/
+.pytest_cache/
+agent/.venv/
+agent/build/
+agent/dist/
+familytime.json
+private/

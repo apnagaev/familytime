@@ -1,0 +1,5 @@
+{
+  "server_url": "https://kids.example.com",
+  "enroll_secret": "тот-же-что-ENROLL_SECRET-на-сервере",
+  "mode": "control"
+}

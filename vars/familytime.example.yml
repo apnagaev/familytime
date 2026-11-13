@@ -1,0 +1,47 @@
+# Скопируйте в vars/familytime.yml и зашифруйте: ansible-vault encrypt vars/familytime.yml
+familytime_version: "1.1.1"
+familytime_dir: /docker-compose/familytime
+familytime_port: 8097                       # порт на хосте для reverse proxy
+familytime_subnet: 172.30.0.0/28          # своя Docker-сеть, одинаковая на узлах
+familytime_public_url: https://kids.example.com
+familytime_timezone: Europe/Moscow
+
+# PostgreSQL: CREATE USER familytime ...; CREATE DATABASE familytime OWNER familytime;
+familytime_database_url: postgresql://familytime:ПАРОЛЬ@10.0.0.10:5432/familytime
+
+# openssl rand -hex 32
+familytime_session_secret: ""
+familytime_enroll_secret: ""                # тот же в familytime.json на общей папке для агентов
+
+# Keycloak: клиент familytime (confidential), роль родителя
+familytime_oidc_issuer: https://sso.example.com/realms/home
+familytime_oidc_client_id: familytime
+familytime_oidc_client_secret: ""
+familytime_oidc_parent_role: familytime-parent
+familytime_oidc_username_claim: preferred_username
+
+# Яндекс Локатор (можно несколько ключей через запятую)
+familytime_yandex_locator_keys: ""
+
+# Traccar: приём OsmAnd и API для автосоздания устройств (токен пользователя Traccar)
+familytime_traccar_osmand_url: http://10.0.0.1:5055
+familytime_traccar_api_url: http://10.0.0.1:8082/api
+familytime_traccar_token: ""
+familytime_traccar_group_id: ""
+familytime_traccar_web_url: https://track.example.com
+
+# Telegram: запросы времени с кнопками (необязательно)
+familytime_telegram_token: ""
+familytime_telegram_chat_ids: ""            # через запятую
+
+# дополнительные сайты, открытые в режиме «только учёба» (через запятую)
+familytime_extra_allowed_domains: ""
+
+# firewall: узлы и vIP прокси, плюс trusted_nets (Docker-сети и localhost открыты всегда)
+firewall: true
+familytime_nodes:
+  - 10.0.0.1
+  - 10.0.0.2
+  - 10.0.0.3                                # vIP балансировщика
+trusted_nets:
+  - 10.0.0.0/24
