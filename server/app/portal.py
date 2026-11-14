@@ -16,7 +16,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, db, lists, policy, requests_logic
+from . import auth, db, lists, locator, policy, requests_logic
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).with_name("templates")))
@@ -586,7 +586,8 @@ async def settings_page(request: Request):
     u = need_admin(request)
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
-    return page(request, "settings.html", u, s=s)
+    return page(request, "settings.html", u, s=s,
+                ip_locations=locator.format_ip_locations(s["ip_locations"]))
 
 
 @router.post("/settings")
@@ -600,8 +601,12 @@ async def settings_save(request: Request):
     except ValueError:
         return back("/settings", err="Неверное число")
     lost = str(form.get("lost", "")).strip()[:1000] or policy.DEFAULT_SETTINGS["messages"]["lost"]
+    known, errors = locator.parse_ip_locations(str(form.get("ip_locations", "")))
+    if errors:
+        return back("/settings", err="Известные адреса, не разобрано: " + "; ".join(errors[:3]))
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
+        await db.set_setting(conn, "ip_locations", known[:500], u.username)
         await db.set_setting(conn, "location", loc, u.username)
         await db.set_setting(conn, "messages", {**s["messages"], "lost": lost}, u.username)
     return back("/settings", ok="Сохранено. Компьютеры получат изменения в течение минуты")

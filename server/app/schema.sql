@@ -155,3 +155,16 @@ ALTER TABLE ft_lists ADD COLUMN IF NOT EXISTS username text REFERENCES ft_childr
 ALTER TABLE ft_lists DROP CONSTRAINT IF EXISTS ft_lists_category_url_key;
 CREATE UNIQUE INDEX IF NOT EXISTS ft_lists_child_url ON ft_lists (username, category, url);
 ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS family_id bigint REFERENCES ft_families ON DELETE SET NULL;
+
+-- место по IP и повторное использование места по Wi-Fi (1.2.1)
+CREATE TABLE IF NOT EXISTS ft_geoip (
+    ip         text PRIMARY KEY,
+    lat        double precision NOT NULL,
+    lon        double precision NOT NULL,
+    accuracy   double precision NOT NULL,
+    source     text NOT NULL,
+    place      text NOT NULL DEFAULT '',
+    fetched_at timestamptz NOT NULL
+);
+ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS last_wifi_sig text NOT NULL DEFAULT '';
+ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS last_place text NOT NULL DEFAULT '';

@@ -1,5 +1,5 @@
 # Скопируйте в vars/familytime.yml и зашифруйте: ansible-vault encrypt vars/familytime.yml
-familytime_version: "1.2.0"
+familytime_version: "1.2.1"
 familytime_dir: /docker-compose/familytime
 familytime_port: 8097                       # порт на хосте для reverse proxy
 familytime_subnet: 172.30.0.0/28          # своя Docker-сеть, одинаковая на узлах
@@ -23,6 +23,10 @@ familytime_oidc_username_claim: preferred_username
 
 # Яндекс Локатор (можно несколько ключей через запятую)
 familytime_yandex_locator_keys: ""
+# место по IP для компьютеров без Wi-Fi (точность — город); {ip} подставляется; "" — выключить.
+# Нужен ответ JSON с lat/lon (или latitude/longitude). Бесплатный ip-api.com — только http,
+# до 45 запросов в минуту; результат запоминается на неделю.
+familytime_geoip_url: "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"
 
 # Traccar: приём OsmAnd и API для автосоздания устройств (токен пользователя Traccar)
 familytime_traccar_osmand_url: http://10.0.0.1:5055

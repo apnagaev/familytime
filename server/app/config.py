@@ -35,6 +35,8 @@ class Config:
     # Яндекс Локатор
     yandex_locator_keys: list[str] = field(default_factory=list)
     yandex_locator_url: str = "https://locator.api.maps.yandex.ru/v1/locate"
+    # место по IP, когда Wi-Fi нет; {ip} подставляется; пусто — не использовать
+    geoip_url: str = "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"
     # Traccar
     traccar_osmand_url: str = ""          # http://10.0.0.1:15055
     traccar_api_url: str = ""             # http://10.0.0.1:82/api
@@ -71,6 +73,8 @@ class Config:
             yandex_locator_keys=_list("YANDEX_LOCATOR_KEYS"),
             yandex_locator_url=os.environ.get(
                 "YANDEX_LOCATOR_URL", "https://locator.api.maps.yandex.ru/v1/locate"),
+            geoip_url=os.environ.get(
+                "GEOIP_URL", "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"),
             traccar_osmand_url=os.environ.get("TRACCAR_OSMAND_URL", "").rstrip("/"),
             traccar_api_url=os.environ.get("TRACCAR_API_URL", "").rstrip("/"),
             traccar_token=os.environ.get("TRACCAR_TOKEN", ""),

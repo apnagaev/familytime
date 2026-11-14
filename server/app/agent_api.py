@@ -373,15 +373,20 @@ async def agent_lists(request: Request, body: ListsIn | None = None, dev=Depends
 async def location(body: LocationIn, request: Request, dev=Depends(current_device)):
     cfg = request.app.state.cfg
     ip = client_ip(request)
-    fix = await locator.locate(request.app.state.http, cfg, body.wifi, ip)
     now = datetime.now(timezone.utc)
     async with request.app.state.pool.acquire() as conn:
         settings = await db.get_settings(conn)
+        fix, sig = await locator.resolve(request.app.state.http, cfg, conn, settings, dev,
+                                         body.wifi, ip)
         if fix:
+            # повторно использованное место не продлевает свой срок: last_fix_at не трогаем
             await conn.execute(
                 """UPDATE ft_devices SET last_lat = $2, last_lon = $3, last_accuracy = $4,
-                   last_fix_at = $5, last_fix_source = $6, battery = $7, on_ac = $8 WHERE id = $1""",
-                dev["id"], fix.lat, fix.lon, fix.accuracy, now, fix.source, body.battery, body.on_ac)
+                   last_fix_at = CASE WHEN $11 THEN last_fix_at ELSE $5 END,
+                   last_fix_source = $6, battery = $7, on_ac = $8, last_wifi_sig = $9,
+                   last_place = $10, last_ip = $12 WHERE id = $1""",
+                dev["id"], fix.lat, fix.lon, fix.accuracy, now, fix.source, body.battery,
+                body.on_ac, sig, fix.place, fix.cached and fix.source == "yandex-wifi", ip)
         else:
             await conn.execute("UPDATE ft_devices SET battery = $2, on_ac = $3 WHERE id = $1",
                                dev["id"], body.battery, body.on_ac)
@@ -403,5 +408,6 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
         "lat": fix.lat if fix else None,
         "lon": fix.lon if fix else None,
         "accuracy": fix.accuracy if fix else None,
+        "source": fix.source if fix else None,
         "next_interval": max(60, int(interval) * 60),
     }

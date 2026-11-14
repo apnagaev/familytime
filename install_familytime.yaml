@@ -5,7 +5,7 @@
   serial: 1
   become: true
   vars:
-    familytime_version: "1.2.0"
+    familytime_version: "1.2.1"
     familytime_dir: /docker-compose/familytime
     familytime_port: 8097
     familytime_subnet: 172.30.0.0/28
@@ -16,6 +16,7 @@
     familytime_oidc_admin_role: admin
     familytime_oidc_username_claim: preferred_username
     familytime_yandex_locator_keys: ""
+    familytime_geoip_url: "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"
     familytime_traccar_osmand_url: ""
     familytime_traccar_api_url: ""
     familytime_traccar_token: ""
