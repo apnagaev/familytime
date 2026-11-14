@@ -6,7 +6,7 @@
 {% for v in rows %}
   <div class="card">
     <div class="spread">
-      <h2><a href="/child/{{ v.child.username }}">{{ v.child.display_name }}</a></h2>
+      <h2><a href="/child/{{ v.child.username }}">{{ v.child.display_name }}</a>{% if families|length > 1 or user.admin %} <span class="muted small">{{ fam_names.get(v.child.family_id, 'без семьи') }}</span>{% endif %}</h2>
       {% if not v.child.enabled %}<span class="pill warn">контроль выключен</span>{% else %}{{ m.status_pill(v.st) }}{% endif %}
     </div>
     <div class="big">{{ fmt(v.st.counted_seconds) }}</div>
@@ -40,10 +40,13 @@
   <h2>Добавить ребёнка</h2>
   <form method="post" action="/children" class="row">
     <input type="hidden" name="csrf" value="{{ user.csrf }}">
-    <input type="text" name="username" placeholder="логин в AD, например ivan" required>
+    <input type="text" name="username" placeholder="логин, например ivan" required>
     <input type="text" name="display_name" placeholder="имя для сообщений: Ваня">
+    {% if families|length > 1 %}
+    <select name="family_id">{% for f in families %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}</select>
+    {% endif %}
     <button>Добавить</button>
   </form>
-  <p class="hint">Логин — как при входе в Windows (sAMAccountName), без домена. Контроль включается только для учётных записей из этого списка, взрослые на тех же компьютерах не считаются.</p>
+  <p class="hint">Логин — как при входе в Windows в домене (sAMAccountName), без домена. Для компьютера вне домена подойдёт любое короткое имя: логины Windows и почту для входа в портал добавите на странице ребёнка.{% if not families %} Семья создастся автоматически.{% endif %}</p>
 </div>
 {% endblock %}

@@ -179,9 +179,12 @@ def test_full_flow(client, calls):
         assert r.status_code == code, origin
     c.post("/child/ivan/bonus", data={"minutes": "-3", "csrf": t})
 
-    # настройки сообщений
-    c.post("/settings", data={"section": "messages", "csrf": t, "warn": "Осталось {left}!",
-                              "limit": "Стоп, {name}. Лимит {limit}.", "window": "", "lost": ""})
+    # сообщения — настройка семьи (она создалась при добавлении первого ребёнка)
+    fam_page = c.get("/family").text
+    assert "Семья parent" in fam_page and ">Ваня<" in fam_page
+    fam_id = re.search(r'action="/family/(\d+)"', fam_page).group(1)
+    c.post(f"/family/{fam_id}", data={"section": "messages", "csrf": t, "warn": "Осталось {left}!",
+                                       "limit": "Стоп, {name}. Лимит {limit}.", "window": ""})
     body["seq"] = 5
     p = c.post("/api/agent/heartbeat", json=body, headers=h).json()["users"]["ivan"]
     assert p["messages"]["limit"] == "Стоп, Ваня. Лимит 30 мин."
@@ -216,8 +219,9 @@ def test_full_flow(client, calls):
     assert r["device"]["location_interval"] == 120
 
     # все страницы родителя открываются
-    for path in ("/dashboard", "/child/ivan", "/settings", "/devices", "/requests"):
+    for path in ("/dashboard", "/child/ivan", "/family", "/devices", "/requests"):
         assert c.get(path).status_code == 200, path
+    assert c.get("/settings").status_code == 403           # общие настройки — только админу
     assert "Вернуть время" in c.get("/dashboard").text
 
     # решение из Telegram: чужой чат не может, свой может

@@ -119,7 +119,7 @@ OLD_AGENT_LIMIT = 5000      # агентам 1.0.x списки идут в ка
 
 
 def restricted_domains(cfg, eff: dict) -> list[str]:
-    """Открытые в режиме «только учёба»: портал и Keycloak, протоколы (telemost:*), учебные."""
+    """Открытые в режиме «только учёба»: протоколы (telemost:*), портал и Keycloak, учебные."""
     out: list[str] = [f"{sch}:*" for sch in eff.get("edu_schemes", [])]
     for extra in [_host(cfg.public_url), _host(cfg.oidc_issuer), *cfg.extra_allowed_domains]:
         extra = policy.norm_domain(extra)
@@ -140,18 +140,24 @@ def lists_payload(cfg, eff: dict, limit: int | None = None) -> dict:
     }
 
 
-def device_policy(cfg, dev, settings: dict, eff: dict, caps=()) -> dict:
+def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_set: dict | None = None) -> dict:
+    """Политика компьютера. Агент 1.2 (caps userlists) берёт списки, простой и предупреждения
+    из политики ребёнка; агентам 1.1 и 1.0 отдаётся один набор на компьютер — объединение
+    по детям его семьи (union)."""
     loc = settings["location"]
     interval = loc["lost_interval_minutes"] if dev["lost"] else loc["interval_minutes"]
-    out = {"lists_version": eff["version"]} if "lists" in caps \
-        else lists_payload(cfg, eff, OLD_AGENT_LIMIT)
+    cs = child_set or policy.child_settings({})
+    out: dict = {}
+    if "userlists" not in caps and union is not None:
+        out = {"lists_version": union["version"]} if "lists" in caps \
+            else lists_payload(cfg, union, OLD_AGENT_LIMIT)
     return {
         **out,
         "mode": dev["mode"],
         "browsers": settings["browsers"],
-        "restricted_kill": settings["restricted_kill"],
-        "idle_minutes": int(settings["idle_minutes"]),
-        "warn_minutes": [int(x) for x in settings["warn_minutes"]],
+        "restricted_kill": cs["restricted_kill"],
+        "idle_minutes": int(cs["idle_minutes"]),
+        "warn_minutes": [int(x) for x in cs["warn_minutes"]],
         "location_interval": max(60, int(interval) * 60),
         "portal_url": cfg.public_url,
         "lost": {
@@ -162,10 +168,9 @@ def device_policy(cfg, dev, settings: dict, eff: dict, caps=()) -> dict:
     }
 
 
-async def user_policy(conn, cfg, username: str, settings: dict, now_local: datetime) -> dict:
-    child = await db.get_child(conn, username)
-    if not child or not child["enabled"]:
-        return {"child": False, "mode": "none"}
+async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
+    """Политика ребёнка: лимит и остаток, тексты его семьи, его списки (версия), простой."""
+    username = child["username"]
     st = await db.child_status(conn, username, now_local)
     rule = st["rule"]
     values = {
@@ -175,7 +180,10 @@ async def user_policy(conn, cfg, username: str, settings: dict, now_local: datet
         "from": policy.fmt_time(rule.window_from),
         "to": policy.fmt_time(rule.window_to),
     }
-    msgs = settings["messages"]
+    fam = await conn.fetchval("SELECT messages FROM ft_families WHERE id = $1", child["family_id"])
+    msgs = policy.family_messages(fam)
+    cs = policy.child_settings(child["settings"])
+    eff = await lists.effective(conn, child)
     return {
         "child": True,
         "name": child["display_name"],
@@ -187,6 +195,10 @@ async def user_policy(conn, cfg, username: str, settings: dict, now_local: datet
         "remaining_seconds": st["remaining_seconds"],
         "window_change_in": st["window_change_in"],
         "messages": {k: policy.render(msgs.get(k, ""), values) for k in ("warn", "limit", "window")},
+        "lists_version": eff["version"],
+        "restricted_kill": cs["restricted_kill"],
+        "idle_minutes": int(cs["idle_minutes"]),
+        "warn_minutes": [int(x) for x in cs["warn_minutes"]],
         # на случай работы без связи: правила недели, бонусы не учитываются
         "rules": {
             str(wd): {
@@ -236,10 +248,18 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
     now_local = now.astimezone(cfg.tz)
     async with request.app.state.pool.acquire() as conn:
         settings = await db.get_settings(conn)
-        eff = await lists.effective(conn, settings)
-        rules = {"edu_apps": eff["edu_apps_set"], "edu_domains": eff["edu_domains_set"],
-                 "browsers": settings["browsers"]}
-        children = {r["username"] for r in await db.list_children(conn, enabled_only=True)}
+        logins = await db.windows_logins(conn)          # логин Windows → ребёнок
+        kids = {r["username"]: r for r in await db.list_children(conn, enabled_only=True)}
+        rules_cache: dict[str, dict] = {}
+
+        async def rules_of(child_name: str) -> dict:
+            if child_name not in rules_cache:
+                eff = await lists.effective(conn, kids[child_name])
+                rules_cache[child_name] = {"edu_apps": eff["edu_apps_set"],
+                                           "edu_domains": eff["edu_domains_set"],
+                                           "browsers": settings["browsers"]}
+            return rules_cache[child_name]
+
         names: dict[str, str] = {}
         for x in [*body.samples, body.current or Current()]:
             exe, app = policy.norm_exe(x.exe), x.app.strip()[:80]
@@ -255,14 +275,14 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
                 usage_add: dict = defaultdict(lambda: [0, 0])
                 act_add: dict = defaultdict(lambda: [0, 0])
                 for s in body.samples:
-                    user = norm_user(s.user)
-                    if user not in children:
+                    user = logins.get(norm_user(s.user))
+                    if not user:
                         continue
                     ts = datetime.fromtimestamp(s.t, timezone.utc)
                     if ts > now + timedelta(minutes=5) or ts < now - MAX_SAMPLE_AGE:
                         continue
                     day = ts.astimezone(cfg.tz).date()
-                    kind, name, free = classify(s, rules)
+                    kind, name, free = classify(s, await rules_of(user))
                     i = 1 if free else 0
                     usage_add[(user, day)][i] += s.sec
                     act_add[(user, day, kind, name[:200])][i] += s.sec
@@ -283,14 +303,19 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
                         user, day, kind, name, c, f)
             if names:
                 await db.save_app_names(conn, names)
-            cur_user = norm_user(body.user)
+            win_user = norm_user(body.user)
+            cur_child = logins.get(win_user)
+            family_id = dev["family_id"]
+            if family_id is None and cur_child and kids[cur_child]["family_id"] is not None:
+                # компьютер без семьи привязывается к семье первого вошедшего ребёнка
+                family_id = kids[cur_child]["family_id"]
             await conn.execute(
                 """UPDATE ft_devices SET last_seen = $2, last_ip = $3, last_user = $4,
                    last_session = $5, agent_version = $6, os_version = $7,
-                   last_seq = GREATEST(last_seq, $8) WHERE id = $1""",
-                dev["id"], now, client_ip(request), cur_user or None, body.session[:20],
-                body.agent_version[:50], body.os[:200], body.seq)
-            if cur_user in children and dev["mode"] == "control":
+                   last_seq = GREATEST(last_seq, $8), family_id = $9 WHERE id = $1""",
+                dev["id"], now, client_ip(request), win_user or None, body.session[:20],
+                body.agent_version[:50], body.os[:200], body.seq, family_id)
+            if cur_child and dev["mode"] == "control":
                 cur = body.current or Current()
                 await conn.execute(
                     """INSERT INTO ft_presence (username, device_id, last_seen, session, exe, domain, app)
@@ -298,33 +323,49 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
                        ON CONFLICT (username, device_id) DO UPDATE SET last_seen = EXCLUDED.last_seen,
                        session = EXCLUDED.session, exe = EXCLUDED.exe, domain = EXCLUDED.domain,
                        app = EXCLUDED.app""",
-                    cur_user, dev["id"], now, body.session[:20],
+                    cur_child, dev["id"], now, body.session[:20],
                     policy.norm_exe(cur.exe), policy.norm_domain(cur.domain), cur.app.strip()[:80])
 
-        users = {norm_user(body.user)} | {norm_user(s.user) for s in body.samples}
+        # политики — по логинам Windows, как их знает агент
+        users = {win_user} | {norm_user(s.user) for s in body.samples}
         users.discard("")
         policies = {}
         if dev["mode"] == "control":
             for u in sorted(users):
-                policies[u] = await user_policy(conn, cfg, u, settings, now_local)
+                child_name = logins.get(u)
+                policies[u] = await user_policy(conn, cfg, kids[child_name], now_local) \
+                    if child_name else {"child": False, "mode": "none"}
         dev = await conn.fetchrow("SELECT * FROM ft_devices WHERE id = $1", dev["id"])
+        union = None if "userlists" in body.caps \
+            else await lists.effective_union(conn, dev["family_id"])
+        child_set = policy.child_settings(kids[cur_child]["settings"]) if cur_child else None
     return {
         "server_time": now.timestamp(),
         "utc_offset": int(now_local.utcoffset().total_seconds()),
         "accepted": accepted,
         "seq": body.seq,
-        "device": device_policy(cfg, dev, settings, eff, body.caps),
+        "device": device_policy(cfg, dev, settings, union, body.caps, child_set),
         "users": policies,
     }
 
 
+class ListsIn(BaseModel):
+    user: str = ""          # логин Windows; пусто — агент 1.1, один набор на компьютер
+
+
 @router.post("/lists")
-async def agent_lists(request: Request, dev=Depends(current_device)):
-    """Полные списки для агента; агент забирает их, только когда меняется lists_version."""
+async def agent_lists(request: Request, body: ListsIn | None = None, dev=Depends(current_device)):
+    """Полные списки; агент забирает их, только когда меняется lists_version."""
     cfg = request.app.state.cfg
     async with request.app.state.pool.acquire() as conn:
-        settings = await db.get_settings(conn)
-        eff = await lists.effective(conn, settings)
+        login = norm_user(body.user) if body else ""
+        if login:
+            child_name = (await db.windows_logins(conn)).get(login)
+            if not child_name:
+                raise HTTPException(404, "not a child")
+            eff = await lists.effective(conn, await db.get_child(conn, child_name))
+        else:
+            eff = await lists.effective_union(conn, dev["family_id"])
     return {"version": eff["version"], **lists_payload(cfg, eff)}
 
 

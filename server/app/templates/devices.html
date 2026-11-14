@@ -5,6 +5,7 @@
 <div class="card">
   <div class="spread">
     <h2>{{ d.hostname.split('.')[0] }} <span class="muted small">{{ d.hostname }}</span></h2>
+    {% if user.admin or families|length > 1 %}<span class="muted small">{{ fam_names.get(d.family_id, 'без семьи') }}</span>{% endif %}
     {% if d.lost %}<span class="pill bad">потерян</span>{% elif d.mode == 'track' %}<span class="pill free">только локация</span>{% else %}<span class="pill">контроль времени</span>{% endif %}
   </div>
   <div class="small">
@@ -24,6 +25,9 @@
         <option value="control" {{ 'selected' if d.mode == 'control' }}>контроль времени и локация</option>
         <option value="track" {{ 'selected' if d.mode == 'track' }}>только локация (взрослые)</option>
       </select>
+      {% if user.admin %}
+      <select name="family_id"><option value="">без семьи</option>{% for f in families %}<option value="{{ f.id }}" {{ 'selected' if f.id == d.family_id }}>{{ f.name }}</option>{% endfor %}</select>
+      {% endif %}
       <label><input type="checkbox" name="lost" value="1" {{ 'checked' if d.lost }}> потерян</label>
       <label><input type="checkbox" name="lost_lock" value="1" {{ 'checked' if d.lost_lock }}> блокировать вход</label>
     </div>
@@ -36,7 +40,7 @@
   </form>
 </div>
 {% else %}
-<div class="card muted">Компьютеров пока нет. Установите агент — компьютер появится здесь после первого выхода на связь.</div>
+<div class="card muted">Компьютеров пока нет. {% if user.admin %}Установите агент — компьютер появится здесь после первого выхода на связь.{% else %}Компьютер появится здесь, когда на нём с установленным агентом войдёт ваш ребёнок или администратор привяжет его к вашей семье.{% endif %}</div>
 {% endfor %}
 <p class="hint">«Потерян»: локация отправляется чаще, на экране висит сообщение. «Блокировать вход» дополнительно сразу завершает любой сеанс на этом компьютере.</p>
 {% endblock %}

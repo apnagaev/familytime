@@ -24,7 +24,40 @@ async def create_pool(dsn: str) -> asyncpg.Pool:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock($1)", MIGRATION_LOCK)
             await conn.execute(sql)
+            await _migrate_v2(conn)
     return pool
+
+
+async def _migrate_v2(conn) -> None:
+    """1.1 → 1.2: общие настройки и подписки становятся настройками каждого ребёнка,
+    все существующие дети и компьютеры — в семью «Семья». Один раз."""
+    if (await conn.fetchval("SELECT value FROM ft_kv WHERE key = 'schema_version'")) == "2":
+        return
+    rows = await conn.fetch("SELECT key, value FROM ft_settings")
+    glob = policy.merge_settings({r["key"]: r["value"] for r in rows})
+    children = [r["username"] for r in await conn.fetch("SELECT username FROM ft_children")]
+    if children:
+        fam = await conn.fetchval("SELECT id FROM ft_families ORDER BY id LIMIT 1")
+        if fam is None:
+            fam = await conn.fetchval(
+                "INSERT INTO ft_families (name, messages) VALUES ('Семья', $1) RETURNING id",
+                {k: glob["messages"][k] for k in policy.FAMILY_MESSAGE_KEYS})
+        await conn.execute("UPDATE ft_children SET family_id = $1 WHERE family_id IS NULL", fam)
+        await conn.execute("UPDATE ft_devices SET family_id = $1 WHERE family_id IS NULL", fam)
+        child_set = {k: glob[k] for k in policy.CHILD_KEYS}
+        await conn.execute("UPDATE ft_children SET settings = $1 WHERE settings = '{}'::jsonb",
+                           child_set)
+        for sub in await conn.fetch("SELECT * FROM ft_lists WHERE username IS NULL"):
+            for u in children:
+                await conn.execute(
+                    """INSERT INTO ft_lists (username, category, name, url, enabled, interval_hours,
+                       entries, count, last_fetch, last_ok, error, etag, last_modified)
+                       SELECT $2, category, name, url, enabled, interval_hours, entries, count,
+                              last_fetch, last_ok, error, etag, last_modified
+                       FROM ft_lists WHERE id = $1 ON CONFLICT DO NOTHING""", sub["id"], u)
+    await conn.execute("DELETE FROM ft_lists WHERE username IS NULL")
+    await conn.execute(
+        "INSERT INTO ft_kv VALUES ('schema_version', '2') ON CONFLICT (key) DO UPDATE SET value = '2'")
 
 
 # ---------- настройки ----------
@@ -42,26 +75,77 @@ async def set_setting(conn, key: str, value, by: str) -> None:
         key, value, by)
 
 
+# ---------- семьи ----------
+
+async def parent_families(conn, username: str) -> list[int]:
+    return [r["family_id"] for r in await conn.fetch(
+        "SELECT family_id FROM ft_family_parents WHERE username = $1", username.lower())]
+
+
+async def list_families(conn, ids: list[int] | None = None):
+    q = """SELECT f.*, COALESCE((SELECT array_agg(username ORDER BY username)
+                  FROM ft_family_parents p WHERE p.family_id = f.id), '{}') AS parents
+           FROM ft_families f"""
+    if ids is not None:
+        return await conn.fetch(q + " WHERE f.id = ANY($1::bigint[]) ORDER BY f.name", ids)
+    return await conn.fetch(q + " ORDER BY f.name")
+
+
+async def create_family(conn, name: str, parent: str | None = None) -> int:
+    fid = await conn.fetchval("INSERT INTO ft_families (name) VALUES ($1) RETURNING id",
+                              name.strip()[:100] or "Семья")
+    if parent:
+        await conn.execute("INSERT INTO ft_family_parents VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                           fid, parent.lower())
+    return fid
+
+
 # ---------- дети и правила ----------
 
-async def list_children(conn, enabled_only: bool = False):
-    q = "SELECT * FROM ft_children"
+async def list_children(conn, enabled_only: bool = False, families: list[int] | None = None):
+    """families=None — все (админ, агенты); список — только дети этих семей."""
+    q = "SELECT * FROM ft_children WHERE true"
+    args: list = []
     if enabled_only:
-        q += " WHERE enabled"
-    return await conn.fetch(q + " ORDER BY display_name")
+        q += " AND enabled"
+    if families is not None:
+        args.append(families)
+        q += " AND family_id = ANY($1::bigint[])"
+    return await conn.fetch(q + " ORDER BY display_name", *args)
 
 
 async def get_child(conn, username: str):
     return await conn.fetchrow("SELECT * FROM ft_children WHERE username = $1", username.lower())
 
 
-async def add_child(conn, username: str, display_name: str) -> None:
+async def child_by_login(conn, username: str, email: str = ""):
+    """Ребёнок по логину Keycloak или подтверждённой почте (дети на ПК вне домена)."""
+    r = await conn.fetchrow("SELECT * FROM ft_children WHERE username = $1", username.lower())
+    if r is None and email:
+        r = await conn.fetchrow("SELECT * FROM ft_children WHERE email <> '' AND lower(email) = $1",
+                                email.lower())
+    return r
+
+
+async def windows_logins(conn) -> dict[str, str]:
+    """Логин Windows (основной и дополнительные) → ребёнок, только включённые."""
+    out: dict[str, str] = {}
+    for r in await conn.fetch("SELECT username, aliases FROM ft_children WHERE enabled"):
+        out[r["username"]] = r["username"]
+        for a in r["aliases"] or []:
+            out.setdefault(a, r["username"])
+    return out
+
+
+async def add_child(conn, username: str, display_name: str, family_id: int | None = None) -> None:
     username = username.strip().lower()
     async with conn.transaction():
         await conn.execute(
-            "INSERT INTO ft_children (username, display_name) VALUES ($1, $2) "
-            "ON CONFLICT (username) DO UPDATE SET display_name = EXCLUDED.display_name, enabled = true",
-            username, display_name.strip() or username)
+            """INSERT INTO ft_children (username, display_name, family_id, settings)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (username) DO UPDATE SET display_name = EXCLUDED.display_name,
+               enabled = true, family_id = COALESCE(EXCLUDED.family_id, ft_children.family_id)""",
+            username, display_name.strip() or username, family_id, policy.child_settings({}))
         for wd, (lim, a, b) in enumerate(policy.DEFAULT_RULES):
             await conn.execute(
                 "INSERT INTO ft_rules VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",

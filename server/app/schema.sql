@@ -132,3 +132,26 @@ CREATE TABLE IF NOT EXISTS ft_app_names (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE ft_presence ADD COLUMN IF NOT EXISTS app text NOT NULL DEFAULT '';
+
+-- многосемейный режим (1.2)
+CREATE TABLE IF NOT EXISTS ft_families (
+    id             bigserial PRIMARY KEY,
+    name           text NOT NULL,
+    messages       jsonb NOT NULL DEFAULT '{}',
+    telegram_chats jsonb NOT NULL DEFAULT '[]',
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ft_family_parents (
+    family_id bigint NOT NULL REFERENCES ft_families ON DELETE CASCADE,
+    username  text NOT NULL,
+    PRIMARY KEY (family_id, username)
+);
+ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS family_id bigint REFERENCES ft_families ON DELETE SET NULL;
+ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS email text NOT NULL DEFAULT '';
+ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS aliases jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}';
+CREATE UNIQUE INDEX IF NOT EXISTS ft_children_email ON ft_children (lower(email)) WHERE email <> '';
+ALTER TABLE ft_lists ADD COLUMN IF NOT EXISTS username text REFERENCES ft_children ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE ft_lists DROP CONSTRAINT IF EXISTS ft_lists_category_url_key;
+CREATE UNIQUE INDEX IF NOT EXISTS ft_lists_child_url ON ft_lists (username, category, url);
+ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS family_id bigint REFERENCES ft_families ON DELETE SET NULL;

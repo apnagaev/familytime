@@ -52,6 +52,30 @@ DEFAULT_SETTINGS: dict = {
     "location": {"interval_minutes": 15, "lost_interval_minutes": 2},
 }
 
+# что настраивается у каждого ребёнка (копируется между детьми вместе с подписками)
+CHILD_LIST_KEYS = {
+    "edu_domains": "domain", "blocked_domains": "domain", "edu_apps": "exe",
+    "blocked_apps": "exe", "edu_schemes": "scheme", "restricted_kill": "exe",
+}
+CHILD_KEYS = (*CHILD_LIST_KEYS, "idle_minutes", "warn_minutes")
+FAMILY_MESSAGE_KEYS = ("warn", "limit", "window")
+
+
+def child_settings(stored: dict | None) -> dict:
+    """Настройки ребёнка поверх значений по умолчанию."""
+    out = {k: copy.deepcopy(DEFAULT_SETTINGS[k]) for k in CHILD_KEYS}
+    for k, v in (stored or {}).items():
+        if k in out:
+            out[k] = v
+    return out
+
+
+def family_messages(stored: dict | None) -> dict:
+    out = {k: DEFAULT_SETTINGS["messages"][k] for k in FAMILY_MESSAGE_KEYS}
+    out.update({k: v for k, v in (stored or {}).items() if k in out and v})
+    return out
+
+
 DEFAULT_RULES = [
     # (лимит, с, до) по дням Пн..Вс
     (90, time(7, 0), time(21, 30)),
