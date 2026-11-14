@@ -1,5 +1,5 @@
 # Скопируйте в vars/familytime.yml и зашифруйте: ansible-vault encrypt vars/familytime.yml
-familytime_version: "1.1.1"
+familytime_version: "1.2.0"
 familytime_dir: /docker-compose/familytime
 familytime_port: 8097                       # порт на хосте для reverse proxy
 familytime_subnet: 172.30.0.0/28          # своя Docker-сеть, одинаковая на узлах
@@ -13,11 +13,12 @@ familytime_database_url: postgresql://familytime:ПАРОЛЬ@10.0.0.10:5432/fam
 familytime_session_secret: ""
 familytime_enroll_secret: ""                # тот же в familytime.json на общей папке для агентов
 
-# Keycloak: клиент familytime (confidential), роль родителя
+# Keycloak: клиент familytime (confidential); роли — роли этого клиента, не realm
 familytime_oidc_issuer: https://sso.example.com/realms/home
 familytime_oidc_client_id: familytime
 familytime_oidc_client_secret: ""
-familytime_oidc_parent_role: familytime-parent
+familytime_oidc_parent_role: parent          # видит детей своих семей
+familytime_oidc_admin_role: admin            # видит все семьи и компьютеры, общие настройки
 familytime_oidc_username_claim: preferred_username
 
 # Яндекс Локатор (можно несколько ключей через запятую)

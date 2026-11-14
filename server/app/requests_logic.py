@@ -21,9 +21,10 @@ async def create(pool, cfg, tg, username: str, minutes: int, reason: str) -> str
             "INSERT INTO ft_requests (username, day, minutes, reason) VALUES ($1,$2,$3,$4) RETURNING id",
             username, now_local.date(), minutes, reason[:300])
         st = await db.child_status(conn, username, now_local)
+        chats = await tg.chats_for(conn, username)
     line = (f"Сегодня: {policy.fmt_minutes(st['counted_seconds'])} из "
             f"{policy.fmt_minutes(st['limit_seconds'])}, учёба {policy.fmt_minutes(st['free_seconds'])}")
-    await tg.notify_request(rid, child["display_name"], minutes, reason, line)
+    await tg.notify_request(rid, child["display_name"], minutes, reason, line, chats)
     return "Запрос отправлен родителям"
 
 

@@ -27,8 +27,10 @@ SESSION_MAX_AGE = 12 * 3600
 class User:
     username: str
     name: str
-    parent: bool
+    parent: bool          # роль parent или admin: может управлять детьми своих семей
     csrf: str
+    admin: bool = False   # роль admin: все семьи, компьютеры, общие настройки
+    email: str = ""       # только подтверждённая почта (email_verified)
 
 
 class OIDC:
@@ -83,8 +85,10 @@ def _secure(cfg) -> bool:
     return cfg.public_url.startswith("https://")
 
 
-def make_session(cfg, response, username: str, name: str, parent: bool) -> None:
-    data = {"u": username, "n": name, "p": parent, "c": secrets.token_urlsafe(16)}
+def make_session(cfg, response, username: str, name: str, parent: bool, admin: bool = False,
+                 email: str = "") -> None:
+    data = {"u": username, "n": name, "p": parent or admin, "a": admin, "e": email,
+            "c": secrets.token_urlsafe(16)}
     response.set_cookie(SESSION_COOKIE, _serializer(cfg, "session").dumps(data),
                         max_age=SESSION_MAX_AGE, httponly=True, secure=_secure(cfg), samesite="lax")
 
@@ -98,7 +102,7 @@ def current_user(request: Request) -> User | None:
         d = _serializer(cfg, "session").loads(raw, max_age=SESSION_MAX_AGE)
     except BadSignature:
         return None
-    return User(d["u"], d["n"], bool(d["p"]), d["c"])
+    return User(d["u"], d["n"], bool(d["p"]), d["c"], bool(d.get("a")), d.get("e", ""))
 
 
 def _host(url: str) -> str:
@@ -126,15 +130,9 @@ def check_csrf(request: Request, user: User, token: str) -> None:
         raise HTTPException(403, "Запрос пришёл с другого сайта")
 
 
-def _roles(claims: dict, client_id: str) -> set[str]:
-    roles = set(claims.get("realm_access", {}).get("roles", []))
-    for client, v in (claims.get("resource_access") or {}).items():
-        for r in v.get("roles", []):
-            roles.add(r)
-            roles.add(f"{client}:{r}")
-    for g in claims.get("groups", []) or []:
-        roles.add(str(g).strip("/").split("/")[-1])
-    return roles
+def client_roles(claims: dict, client_id: str) -> set[str]:
+    """Роли клиента Keycloak (resource_access.<client>.roles). Роли realm не учитываются."""
+    return set(((claims.get("resource_access") or {}).get(client_id) or {}).get("roles", []))
 
 
 async def login_redirect(request: Request, next_url: str = "/") -> RedirectResponse:
@@ -194,15 +192,18 @@ async def callback(request: Request, code: str, state: str) -> RedirectResponse:
     acc = await oidc.verify(tok["access_token"], None)
     claims = {**acc, **idc}
     username = str(claims.get(cfg.oidc_username_claim) or claims.get("preferred_username") or "")
-    username = username.lower().split("@")[0].split("\\")[-1]
+    # DOMAIN\\login → login; логин с @ не обрезается: иначе ivan@gmail.com совпал бы с ivan из AD
+    username = username.strip().lower().split("\\")[-1]
     if not username:
         raise HTTPException(401, "в токене нет имени пользователя")
     name = claims.get("name") or username
-    roles = _roles(acc, cfg.oidc_client_id) | _roles(idc, cfg.oidc_client_id)
+    email = str(claims.get("email") or "").strip().lower() if claims.get("email_verified") else ""
+    roles = client_roles(acc, cfg.oidc_client_id) | client_roles(idc, cfg.oidc_client_id)
+    admin = cfg.oidc_admin_role in roles
     parent = cfg.oidc_parent_role in roles
     resp = RedirectResponse(flow.get("next", "/"), 302)
     resp.delete_cookie(FLOW_COOKIE)
-    make_session(cfg, resp, username, name, parent)
+    make_session(cfg, resp, username, name, parent, admin, email)
     return resp
 
 

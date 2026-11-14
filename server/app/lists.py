@@ -24,7 +24,7 @@ from . import policy
 
 log = logging.getLogger("familytime.lists")
 
-# категория → (тип записей, ключ ручного списка в настройках, подпись)
+# категория → (тип записей, подпись)
 CATEGORIES = {
     "edu_domains": ("domain", "Учебные сайты"),
     "blocked_domains": ("domain", "Запрещённые сайты"),
@@ -96,40 +96,48 @@ def parse(text: str, kind: str) -> list[str]:
 
 # ---------- итоговые списки ----------
 
-_cache: dict = {"version": None, "data": None}
+_cache: dict = {}          # ключ (ребёнок или union:…) → {"version": …, "data": …}
 
 
-async def _subs_signature(conn) -> str:
+async def _subs_signature(conn, usernames: list[str]) -> str:
     return await conn.fetchval(
         """SELECT COALESCE(string_agg(id || ':' || enabled || ':' ||
                   COALESCE(extract(epoch FROM last_ok)::bigint, 0), ',' ORDER BY id), '')
-           FROM ft_lists""") or ""
+           FROM ft_lists WHERE username = ANY($1::text[])""", usernames) or ""
 
 
-def _manual_signature(settings: dict) -> str:
-    return json.dumps({k: settings.get(k, []) for k in (*CATEGORIES, "edu_schemes")},
-                      sort_keys=True, ensure_ascii=False)
+def _manual(settings_list: list[dict]) -> dict:
+    """Ручные записи нескольких детей (для одного ребёнка — его собственные)."""
+    out: dict = {}
+    for k in (*CATEGORIES, "edu_schemes"):
+        merged: list[str] = []
+        seen: set[str] = set()
+        for st in settings_list:
+            for x in st.get(k, []):
+                if x not in seen:
+                    seen.add(x)
+                    merged.append(x)
+        out[k] = merged
+    return out
 
 
-async def effective(conn, settings: dict) -> dict:
-    """Ручные записи + все включённые подписки. Ручные идут первыми: они попадают в политику
-    браузера в первую очередь, если записей больше POLICY_LIMIT.
-
-    Результат кешируется по подписи (ручные списки + время обновления подписок), поэтому
-    сотни тысяч доменов читаются из базы только после изменений.
-    """
-    sig = _manual_signature(settings) + "|" + await _subs_signature(conn)
+async def _build(conn, key: str, usernames: list[str], settings_list: list[dict]) -> dict:
+    manual = _manual(settings_list)
+    sig = json.dumps(manual, sort_keys=True, ensure_ascii=False) + "|" + \
+        await _subs_signature(conn, usernames)
     version = hashlib.sha1(sig.encode()).hexdigest()[:16]
-    if _cache["version"] == version:
-        return _cache["data"]
-    data: dict = {"version": version}
+    cached = _cache.get(key)
+    if cached and cached["version"] == version:
+        return cached["data"]
+    data: dict = {"version": version, "edu_schemes": manual["edu_schemes"]}
     rows = await conn.fetch(
-        "SELECT category, entries FROM ft_lists WHERE enabled ORDER BY id")
+        "SELECT category, entries FROM ft_lists WHERE enabled AND username = ANY($1::text[]) "
+        "ORDER BY id", usernames)
     for cat in CATEGORIES:
         merged: list[str] = []
         seen: set[str] = set()
-        for x in list(settings.get(cat, [])) + [e for r in rows if r["category"] == cat
-                                                for e in (r["entries"] or [])]:
+        for x in manual[cat] + [e for r in rows if r["category"] == cat
+                                for e in (r["entries"] or [])]:
             if x not in seen:
                 seen.add(x)
                 merged.append(x)
@@ -139,9 +147,30 @@ async def effective(conn, settings: dict) -> dict:
     data["edu_domains"] = [d for d in data["edu_domains"]
                            if not policy.domain_matches(d, data["blocked_domains_set"])]
     data["edu_domains_set"] = set(data["edu_domains"])
-    data["edu_schemes"] = list(settings.get("edu_schemes", []))
-    _cache.update(version=version, data=data)
+    if len(_cache) > 500:
+        _cache.clear()
+    _cache[key] = {"version": version, "data": data}
     return data
+
+
+async def effective(conn, child) -> dict:
+    """Итоговые списки ребёнка: его ручные записи + его включённые подписки.
+    Ручные идут первыми: в политику браузера они попадают в первую очередь.
+    Кеш по подписи (ручные + время обновления подписок)."""
+    st = policy.child_settings(child["settings"])
+    return await _build(conn, "c:" + child["username"], [child["username"]], [st])
+
+
+async def effective_union(conn, family_id: int | None) -> dict:
+    """Для агентов 1.1 (один набор списков на компьютер): объединение по детям семьи
+    компьютера, а у компьютера без семьи — по всем детям."""
+    if family_id is None:
+        kids = await conn.fetch("SELECT username, settings FROM ft_children WHERE enabled")
+    else:
+        kids = await conn.fetch(
+            "SELECT username, settings FROM ft_children WHERE enabled AND family_id = $1", family_id)
+    return await _build(conn, f"u:{family_id}", [k["username"] for k in kids],
+                        [policy.child_settings(k["settings"]) for k in kids])
 
 
 def counts(data: dict) -> dict:

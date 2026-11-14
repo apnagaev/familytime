@@ -24,7 +24,15 @@ class Telegram:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.cfg.telegram_token and self.cfg.telegram_chat_ids)
+        return bool(self.cfg.telegram_token)
+
+    async def chats_for(self, conn, username: str) -> list[str]:
+        """Кому идут запросы ребёнка: чаты его семьи + общие чаты администратора из настроек."""
+        fam = await conn.fetchval(
+            """SELECT f.telegram_chats FROM ft_children c JOIN ft_families f ON f.id = c.family_id
+               WHERE c.username = $1""", username)
+        out = [str(c) for c in (fam or [])]
+        return out + [c for c in self.cfg.telegram_chat_ids if c not in out]
 
     def _url(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self.cfg.telegram_token}/{method}"
@@ -37,8 +45,8 @@ class Telegram:
         return data.get("result")
 
     async def notify_request(self, req_id: int, child_name: str, minutes: int, reason: str,
-                             status_line: str) -> None:
-        if not self.enabled:
+                             status_line: str, chats: list[str]) -> None:
+        if not self.enabled or not chats:
             return
         text = (f"⏱ <b>{html.escape(child_name)}</b> просит ещё <b>{minutes} мин</b>\n"
                 f"{html.escape(status_line)}")
@@ -49,7 +57,7 @@ class Telegram:
             {"text": "❌ Отказать", "callback_data": f"ft:no:{req_id}"},
         ], [{"text": "Открыть портал", "url": self.cfg.public_url + "/requests"}]]}
         sent = []
-        for chat in self.cfg.telegram_chat_ids:
+        for chat in chats:
             try:
                 m = await self.call("sendMessage", chat_id=chat, text=text, parse_mode="HTML",
                                     reply_markup=kb)
@@ -79,10 +87,16 @@ class Telegram:
         data = cb.get("data", "")
         who = cb.get("from", {})
         by = "telegram:" + (who.get("username") or str(who.get("id", "")))
-        if chat not in self.cfg.telegram_chat_ids or not data.startswith("ft:"):
+        if not data.startswith("ft:") or data.count(":") != 2 or not data.split(":")[2].isdigit():
             await self.call("answerCallbackQuery", callback_query_id=cb["id"], text="Нет доступа")
             return
         _, action, rid = data.split(":", 2)
+        async with self.pool.acquire() as conn:
+            who = await conn.fetchval("SELECT username FROM ft_requests WHERE id = $1", int(rid))
+            allowed = await self.chats_for(conn, who) if who else []
+        if chat not in allowed:                    # решать может только чат семьи ребёнка
+            await self.call("answerCallbackQuery", callback_query_id=cb["id"], text="Нет доступа")
+            return
         res = await requests_logic.decide(self.pool, self.cfg, self, int(rid), action == "ok", by)
         await self.call("answerCallbackQuery", callback_query_id=cb["id"], text=res)
 

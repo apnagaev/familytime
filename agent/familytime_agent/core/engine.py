@@ -76,6 +76,7 @@ class Engine:
         self.block_toast = -1e9
         self.lists_path = os.path.join(os.path.dirname(store.path) or ".", "lists.json")
         self.lists: dict = self._load_lists()
+        self._rules_cache: dict[str, tuple] = {}
         self._dev_key = None
         self._dev_src = None
         self._dev: dict = {}
@@ -100,40 +101,92 @@ class Engine:
         except OSError as e:
             log.warning("не удалось сохранить списки: %s", e)
 
-    def sync_lists(self) -> None:
-        want = (self.st.device or {}).get("lists_version")
-        if not want or want == self.lists.get("version"):
-            return
+    def _fetch_lists(self, user: str, want: str) -> dict | None:
         try:
-            r = self.client.post("/api/agent/lists", {}, self.st.token)
+            r = self.client.post("/api/agent/lists", {"user": user} if user else {}, self.st.token)
         except (ApiError, OSError, ValueError) as e:
-            log.warning("списки не загружены: %s", e)
-            return
-        self.lists = {k: r.get(k, []) for k in LIST_KEYS}
-        self.lists["version"] = r.get("version", want)
-        self._save_lists()
-        log.info("списки обновлены: %s", {k: len(self.lists[k]) for k in LIST_KEYS})
+            log.warning("списки%s не загружены: %s", f" ({user})" if user else "", e)
+            return None
+        got = {k: r.get(k, []) for k in LIST_KEYS}
+        got["version"] = r.get("version", want)
+        log.info("списки%s обновлены: %s", f" ({user})" if user else "",
+                 {k: len(got[k]) for k in LIST_KEYS})
+        return got
+
+    def sync_lists(self) -> None:
+        """Сервер 1.2: у каждого ребёнка свои списки (версия — в его политике).
+        Сервер 1.1: один набор на компьютер (версия — в политике устройства)."""
+        changed = False
+        want = (self.st.device or {}).get("lists_version")
+        if want and want != self.lists.get("version"):
+            got = self._fetch_lists("", want)
+            if got:
+                self.lists = {**got, "users": self.lists.get("users", {})}
+                changed = True
+        users = self.lists.setdefault("users", {})
+        for user, pol in (self.st.users or {}).items():
+            want = pol.get("lists_version") if pol.get("child") else None
+            if want and want != users.get(user, {}).get("version"):
+                got = self._fetch_lists(user, want)
+                if got:
+                    users[user] = got
+                    changed = True
+        for user in [u for u in users if not (self.st.users.get(u) or {}).get("child")]:
+            del users[user]                       # ребёнка убрали из списка — его списки не нужны
+            changed = True
+        if changed:
+            self._save_lists()
+            self._rules_cache.clear()
 
     # ---------- общее ----------
 
-    @property
-    def dev(self) -> dict:
-        """Политика устройства. Списки — множества для быстрого поиска (их бывают сотни тысяч);
-        порядок для политик браузеров — в *_order (ручные записи сервер ставит первыми)."""
-        # сам объект st.device (не id: адрес освобождённого словаря может достаться новому)
-        key = (self.lists.get("version"), self.cfg.get("mode"))
-        if self._dev_key == key and self._dev_src is self.st.device:
-            return self._dev
-        d = dict(DEFAULT_DEVICE)
-        d["mode"] = self.cfg.get("mode", "control")
-        d.update(self.st.device or {})
-        if d.get("lists_version") and self.lists:
-            d.update({k: self.lists.get(k, []) for k in LIST_KEYS})
+    @staticmethod
+    def _finish(d: dict) -> dict:
+        """Списки — множества для быстрого поиска (их бывают сотни тысяч); порядок для
+        политик браузеров — в *_order (ручные записи сервер ставит первыми)."""
         d["blocked_domains_order"] = list(d["blocked_domains"])
         d["restricted_domains"] = list(d["restricted_domains"])
         for k in ("edu_apps", "edu_domains", "blocked_apps", "blocked_domains"):
             d[k] = frozenset(d[k])
+        return d
+
+    def _base(self) -> dict:
+        d = dict(DEFAULT_DEVICE)
+        d["mode"] = self.cfg.get("mode", "control")
+        d.update(self.st.device or {})
+        if d.get("lists_version") and self.lists.get("version"):
+            d.update({k: self.lists.get(k, []) for k in LIST_KEYS})
+        return d
+
+    @property
+    def dev(self) -> dict:
+        """Политика устройства: режим, локация, «потерян» и общий набор списков (сервер 1.1)."""
+        # сам объект st.device (не id: адрес освобождённого словаря может достаться новому)
+        key = (self.lists.get("version"), self.cfg.get("mode"))
+        if self._dev_key == key and self._dev_src is self.st.device:
+            return self._dev
+        d = self._finish(self._base())
         self._dev_key, self._dev, self._dev_src = key, d, self.st.device
+        return d
+
+    def rules_for(self, user: str, pol: dict) -> dict:
+        """Правила для вошедшего ребёнка: его списки, простой и предупреждения поверх
+        политики устройства. На сервере 1.1 у ребёнка своих нет — берётся общий набор."""
+        own = (self.lists.get("users") or {}).get(user)
+        if not pol.get("lists_version") and "idle_minutes" not in pol:
+            return self.dev
+        c = self._rules_cache.get(user)
+        ver = (own or {}).get("version")
+        if c and c[0] is self.st.device and c[1] is pol and c[2] == ver:
+            return c[3]
+        d = self._base()
+        if pol.get("lists_version"):
+            d.update({k: (own or {}).get(k, []) for k in LIST_KEYS})
+        for k in ("idle_minutes", "warn_minutes", "restricted_kill"):
+            if k in pol:
+                d[k] = pol[k]
+        d = self._finish(d)
+        self._rules_cache[user] = (self.st.device, pol, ver, d)
         return d
 
     def now_local(self, wall: float):
@@ -189,8 +242,9 @@ class Engine:
         user = sess.user if sess else ""
         pol = self.st.users.get(user) if user else None
         if sess and dev["mode"] == "control" and pol and pol.get("child"):
-            self.account(sess, report, dt, wall, dev)
-            self.enforce(sess, report, wall, mono, pol, dev, directive)
+            rules_ = self.rules_for(user, pol)       # сайты, программы, простой — этого ребёнка
+            self.account(sess, report, dt, wall, rules_)
+            self.enforce(sess, report, wall, mono, pol, rules_, directive)
         elif sess and (pol is not None or dev["mode"] != "control"):
             # не ребёнок (или компьютер «только локация») — снять всё, что агент мог оставить:
             # запреты сайтов, «только учёба», отключённые инкогнито и гостевой режим
@@ -416,7 +470,7 @@ class Engine:
             "session": sess.state if sess else "none", "user": sess.user if sess else "",
             "current": self.last_current if sess else None,
             "samples": [{k: v for k, v in s.items() if k != "free"} for s in batch["samples"]],
-            "caps": ["lists"],
+            "caps": ["lists", "userlists"],
         }
         t0 = self.clock()
         try:

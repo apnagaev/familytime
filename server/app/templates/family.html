@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ 'Семьи' if user.admin else 'Семья' }}</h1>
+
+{% for f in families %}
+{% set m = msg(f.messages) %}
+<div class="card">
+  <form method="post" action="/family/{{ f.id }}" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="name">
+    <input type="text" name="name" value="{{ f.name }}" style="font-size: 18px; font-weight: 600">
+    <button class="ghost">Переименовать</button>
+  </form>
+
+  <label class="block">Дети</label>
+  <div class="row">
+    {% for c in kids if c.family_id == f.id %}<a class="pill" href="/child/{{ c.username }}">{{ c.display_name }}</a>{% else %}<span class="muted small">пока нет — добавьте на странице «Дети»</span>{% endfor %}
+  </div>
+
+  <label class="block">Родители</label>
+  <div class="row">
+    {% for p in f.parents %}
+    <form class="inline" method="post" action="/family/{{ f.id }}" onsubmit="return confirm('Убрать {{ p }} из родителей?')">
+      <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="remove_parent"><input type="hidden" name="parent" value="{{ p }}">
+      <span class="pill">{{ p }}</span>{% if p != user.username or user.admin %}<button class="ghost" style="padding: 0 8px" title="Убрать">✕</button>{% endif %}
+    </form>
+    {% else %}<span class="muted small">никого — семью видит только администратор</span>{% endfor %}
+  </div>
+  <form method="post" action="/family/{{ f.id }}" class="row" style="margin-top: 8px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="add_parent">
+    <input type="text" name="parent" placeholder="логин родителя в Keycloak" required>
+    <button class="ghost">Добавить родителя</button>
+  </form>
+  <p class="hint">Все родители семьи видят всех её детей и компьютеры. У родителя в Keycloak должна быть роль клиента <code>{{ cfg.oidc_parent_role }}</code>.</p>
+
+  <form method="post" action="/family/{{ f.id }}">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="messages">
+    <label class="block">Сообщения детям</label>
+    <p class="hint">Подстановки: <code>{name}</code> — имя ребёнка, <code>{limit}</code> — лимит на сегодня, <code>{used}</code> — потрачено, <code>{left}</code> — осталось (в предупреждении), <code>{from}</code>, <code>{to}</code> — свободное время. Пустое поле — текст по умолчанию.</p>
+    <label class="block small">Предупреждение перед концом времени</label>
+    <textarea name="warn" style="min-height: 56px">{{ m.warn }}</textarea>
+    <label class="block small">Время закончилось</label>
+    <textarea name="limit" style="min-height: 80px">{{ m.limit }}</textarea>
+    <label class="block small">Вне свободного времени</label>
+    <textarea name="window" style="min-height: 56px">{{ m.window }}</textarea>
+    <div class="row" style="margin-top: 8px"><button>Сохранить сообщения</button></div>
+  </form>
+
+  <form method="post" action="/family/{{ f.id }}" style="margin-top: 12px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="telegram">
+    <label class="block">Чаты Telegram для запросов времени</label>
+    <div class="row">
+      <input type="text" name="telegram_chats" value="{{ f.telegram_chats|join(', ') }}" placeholder="id чатов через запятую" style="flex: 1; min-width: 200px">
+      <button class="ghost">Сохранить</button>
+    </div>
+    <p class="hint">Запросы детей этой семьи приходят в эти чаты с кнопками «Дать» и «Отказать». Свой id подскажет бот @userinfobot; боту FamilyTime нужно сначала написать /start.</p>
+  </form>
+
+  {% if user.admin %}
+  <form method="post" action="/family/{{ f.id }}" onsubmit="return confirm('Удалить семью? Дети и компьютеры останутся без семьи.')" style="margin-top: 8px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="delete"><button class="danger">Удалить семью</button>
+  </form>
+  {% endif %}
+</div>
+{% else %}
+<div class="card muted">Семьи пока нет. Она создастся, когда вы добавите первого ребёнка на странице «Дети».</div>
+{% endfor %}
+
+{% if user.admin %}
+{% if orphans %}
+<div class="card">
+  <h2>Дети без семьи</h2>
+  <div class="row">{% for c in orphans %}<a class="pill warn" href="/child/{{ c.username }}">{{ c.display_name }}</a>{% endfor %}</div>
+  <p class="hint">Их видит только администратор. Семью можно выбрать на странице ребёнка, в разделе «Учётная запись».</p>
+</div>
+{% endif %}
+<div class="card">
+  <h2>Создать семью</h2>
+  <form method="post" action="/families" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <input type="text" name="name" placeholder="название, например Ивановы" required>
+    <input type="text" name="parent" placeholder="логин первого родителя (необязательно)">
+    <button>Создать</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

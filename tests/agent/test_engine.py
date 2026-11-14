@@ -84,6 +84,8 @@ class FakeClient:
         self.lists_version = None
         self.lists = {}
         self.lists_calls = 0
+        self.user_lists = {}
+        self.user_lists_calls = []
 
     def post(self, path, body, token=""):
         self.calls.append((path, body))
@@ -101,11 +103,15 @@ class FakeClient:
                           if k not in ("edu_apps", "edu_domains", "blocked_apps",
                                        "restricted_domains")}
                 device["lists_version"] = self.lists_version
-            assert body.get("caps") == ["lists"]
+            assert body.get("caps") == ["lists", "userlists"]
             return {"server_time": self.clock(), "utc_offset": 10800, "device": device,
                     "users": {"ivan": policy(self.server_counted, self.limit)}}
         if path.endswith("/lists"):
             self.lists_calls += 1
+            if body.get("user"):                       # сервер 1.2: списки ребёнка
+                self.user_lists_calls.append(body["user"])
+                ver, data = self.user_lists[body["user"]]
+                return {"version": ver, **data}
             return {"version": self.lists_version, **self.lists}
         if path.endswith("/location"):
             return {"ok": True, "next_interval": 900}
@@ -348,3 +354,60 @@ def test_policies_cleared_for_non_child(tmp_path):
     cli.fail = True
     run(eng, clk, 30)
     assert plat.cleared == ["ivan", "parent"]
+
+
+def test_rules_per_child_on_shared_pc(tmp_path):
+    """Сервер 1.2: у каждого ребёнка свои списки, простой и предупреждения."""
+    eng, clk, plat, cli = make(tmp_path)
+    base = {"edu_apps": [], "edu_domains": [], "blocked_apps": [], "restricted_domains": []}
+    cli.user_lists = {
+        "ivan": ("i1", {**base, "blocked_domains": ["vk.com"], "edu_domains": ["uchi.ru"]}),
+        "masha": ("m1", {**base, "blocked_domains": [], "blocked_apps": ["game.exe"]}),
+    }
+    dev12 = {k: v for k, v in DEVICE.items()
+             if k not in ("edu_apps", "edu_domains", "blocked_apps", "restricted_domains")}
+    orig = cli.post
+
+    def post(path, body, token=""):
+        r = orig(path, body, token)
+        if path.endswith("/heartbeat"):
+            r["device"] = dev12
+            for u, idle in (("ivan", 3), ("masha", 20)):
+                if u in r["users"] or body.get("user") == u:
+                    r["users"][u] = {**policy(0, 36000), "lists_version": cli.user_lists[u][0],
+                                     "idle_minutes": idle, "warn_minutes": [1],
+                                     "restricted_kill": []}
+        return r
+    cli.post = post
+
+    # Иван: vk.com запрещён, простой 3 минуты
+    plat.report = {"idle": 0, "fullscreen": False, "windows": [],
+                   "fg": {"exe": "chrome.exe", "domain": "vk.com", "hwnd": 5}}
+    plat.procs = [(70, "game.exe")]
+    eng.step()
+    run(eng, clk, 10)
+    assert cli.user_lists_calls == ["ivan"]
+    assert plat.directive["close_tab"]["domain"] == "vk.com"
+    assert plat.blocked_calls[-1] == ["vk.com"] and 70 not in plat.killed
+    plat.report["fg"]["domain"] = "uchi.ru"
+    plat.report["idle"] = 4 * 60                         # дольше его порога — время не идёт
+    before = len(eng.st.pending)
+    run(eng, clk, 20)
+    assert len(eng.st.pending) == before
+
+    # Маша на том же компьютере: vk.com не запрещён, зато закрывается game.exe; простой 20 минут
+    plat.session = Session(2, "masha", "EXAMPLE", False)
+    plat.report["fg"]["domain"] = "vk.com"
+    plat.killed.clear()
+    run(eng, clk, 30)
+    assert cli.user_lists_calls == ["ivan", "masha"]
+    assert "close_tab" not in plat.directive
+    assert plat.blocked_calls[-1] == [] and 70 in plat.killed
+    assert any(x["user"] == "masha" for x in eng.st.pending + (eng.st.inflight or {}).get("samples", []))
+    # версии не менялись — повторно списки не качаются
+    run(eng, clk, 130)
+    assert cli.user_lists_calls == ["ivan", "masha"]
+    # списки пережили перезапуск службы
+    eng2 = Engine({"server_url": "https://x", "enroll_secret": "e"},
+                  Store(str(tmp_path / "s.json")), plat, cli, clock=clk.wall, mono=clk.mono)
+    assert set(eng2.lists["users"]) == {"ivan", "masha"}

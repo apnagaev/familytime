@@ -27,7 +27,8 @@ class Config:
     oidc_issuer: str = ""                 # https://sso.example.com/realms/home
     oidc_client_id: str = "familytime"
     oidc_client_secret: str = ""
-    oidc_parent_role: str = "familytime-parent"
+    oidc_parent_role: str = "parent"      # роли клиента oidc_client_id
+    oidc_admin_role: str = "admin"
     oidc_username_claim: str = "preferred_username"
     # агенты
     enroll_secret: str = ""
@@ -63,7 +64,8 @@ class Config:
             oidc_issuer=os.environ.get("OIDC_ISSUER", "").rstrip("/"),
             oidc_client_id=os.environ.get("OIDC_CLIENT_ID", "familytime"),
             oidc_client_secret=os.environ.get("OIDC_CLIENT_SECRET", ""),
-            oidc_parent_role=os.environ.get("OIDC_PARENT_ROLE", "familytime-parent"),
+            oidc_parent_role=os.environ.get("OIDC_PARENT_ROLE", "parent"),
+            oidc_admin_role=os.environ.get("OIDC_ADMIN_ROLE", "admin"),
             oidc_username_claim=os.environ.get("OIDC_USERNAME_CLAIM", "preferred_username"),
             enroll_secret=os.environ.get("ENROLL_SECRET", ""),
             yandex_locator_keys=_list("YANDEX_LOCATOR_KEYS"),

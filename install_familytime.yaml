@@ -5,14 +5,15 @@
   serial: 1
   become: true
   vars:
-    familytime_version: "1.1.1"
+    familytime_version: "1.2.0"
     familytime_dir: /docker-compose/familytime
     familytime_port: 8097
     familytime_subnet: 172.30.0.0/28
     familytime_timezone: Europe/Moscow
     familytime_oidc_client_id: familytime
     familytime_oidc_client_secret: ""
-    familytime_oidc_parent_role: familytime-parent
+    familytime_oidc_parent_role: parent
+    familytime_oidc_admin_role: admin
     familytime_oidc_username_claim: preferred_username
     familytime_yandex_locator_keys: ""
     familytime_traccar_osmand_url: ""
