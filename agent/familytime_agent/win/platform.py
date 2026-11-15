@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import logging
 import os
+import shutil
 import socket
+import ssl
+import subprocess
+import urllib.request
 import winreg
+import zipfile
 from ctypes import wintypes
 
 import psutil
@@ -16,6 +22,7 @@ import win32profile
 import win32security
 import win32ts
 
+from .. import VERSION
 from ..core.engine import Session
 from . import wlan
 from .pipe import PipeServer, pid_session
@@ -95,6 +102,9 @@ class WinPlatform:
         self.pipe = PipeServer(self.helper)
         self.pipe.start()
         self._sid_cache: dict[str, str] = {}
+
+    def self_update(self, url: str, sha256: str, version: str) -> None:
+        self_update(url, sha256, version)
 
     # ---------- сведения ----------
 
@@ -377,3 +387,50 @@ def _delete_tree(parent, name: str) -> None:
         winreg.DeleteKey(parent, name)
     except FileNotFoundError:
         pass
+
+
+UPDATE_TASK = r"FamilyTime\Update"
+
+
+def _update_dir() -> str:
+    return os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "FamilyTime", "update")
+
+
+def self_update(url: str, sha256: str, version: str) -> None:
+    """Скачать пакет, проверить SHA-256, распаковать в %ProgramData%\\FamilyTime\\update
+    (туда пишут только SYSTEM и администраторы) и запустить install.ps1 заданием Windows от
+    SYSTEM: установщик останавливает эту службу, поэтому сам процесс службы его не запускает."""
+    base = _update_dir()
+    shutil.rmtree(base, ignore_errors=True)
+    os.makedirs(base, exist_ok=True)
+    zpath = os.path.join(base, "package.zip")
+    h = hashlib.sha256()
+    req = urllib.request.Request(url, headers={"User-Agent": f"familytime-agent/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=300, context=ssl.create_default_context()) as r, \
+            open(zpath, "wb") as f:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+            f.write(chunk)
+    if h.hexdigest().lower() != sha256.lower():
+        raise ValueError("контрольная сумма пакета не совпала")
+    dest = os.path.join(base, "pkg")
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(dest)
+    script = os.path.join(dest, "install.ps1")
+    if not os.path.isfile(script) or not os.path.isfile(os.path.join(dest, "FamilyTime", "version.txt")):
+        raise ValueError("в пакете нет install.ps1 или FamilyTime\\version.txt")
+    run = os.path.join(base, "run.cmd")
+    log_path = os.path.join(base, "run.log")
+    with open(run, "w", encoding="ascii", errors="replace", newline="\r\n") as f:
+        f.write("@echo off\n")
+        f.write(f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{script}" '
+                f'-Source "{dest}" > "{log_path}" 2>&1\n')
+    flags = subprocess.CREATE_NO_WINDOW
+    subprocess.run(["schtasks", "/Create", "/F", "/TN", UPDATE_TASK, "/TR", run, "/SC", "ONCE",
+                    "/ST", "00:00", "/RU", "SYSTEM", "/RL", "HIGHEST"],
+                   check=True, capture_output=True, creationflags=flags, timeout=60)
+    subprocess.run(["schtasks", "/Run", "/TN", UPDATE_TASK],
+                   check=True, capture_output=True, creationflags=flags, timeout=60)

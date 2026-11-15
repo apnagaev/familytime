@@ -365,3 +365,93 @@ def test_lock_rules_across_midnight():
     from datetime import time as t_
     assert ar.in_block(rules["0"], t_(23, 59)) and ar.in_block(rules["1"], t_(6, 59))
     assert not ar.in_block(rules["1"], t_(7, 0)) and not ar.in_block(rules["0"], t_(22, 0))
+
+
+def _package(version="1.4.0"):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("install.ps1", "# install")
+        z.writestr("uninstall.ps1", "# uninstall")
+        z.writestr("FamilyTime/familytime-agent.exe", b"MZ" + b"0" * 1000)
+        z.writestr("FamilyTime/version.txt", version + "\r\n")
+    return buf.getvalue()
+
+
+def test_install_outside_domain(env):
+    import hashlib
+    c, _ = env
+    t = login(c, "mom")
+    c.post("/children", data={"username": "ivan", "display_name": "Ваня", "csrf": t})
+    # пакета ещё нет
+    page = c.get("/devices").text
+    assert "Администратор ещё не загрузил" in page
+    assert c.get("/agent/latest").json() == {"version": ""}
+    # администратор загружает пакет; мусор не принимается
+    ta = login(c, "root", admin=True)
+    r = c.post("/settings/agent", data={"csrf": ta}, files={"package": ("x.zip", b"nope", "application/zip")})
+    assert "это не zip-архив" in r.text
+    pkg = _package("1.4.0")
+    r = c.post("/settings/agent", data={"csrf": ta}, files={"package": ("FamilyTime-1.4.0.zip", pkg, "application/zip")})
+    assert "Агент 1.4.0 загружен" in r.text and "1.4.0" in c.get("/settings").text
+    meta = c.get("/agent/latest").json()
+    assert meta["version"] == "1.4.0" and meta["sha256"] == hashlib.sha256(pkg).hexdigest()
+    r = c.get("/agent/package.zip")
+    assert r.content == pkg and r.headers["x-agent-version"] == "1.4.0"
+    assert "Install-FamilyTime" in c.get("/agent/setup.ps1").text
+    # родитель скачивает установщик с кодом
+    t = login(c, "mom")
+    page = c.get("/devices").text
+    assert "Скачать установщик" in page and "FamilyTime-setup.cmd" in page
+    r = c.post("/devices/installer", data={"csrf": t, "mode": "control"})
+    assert r.headers["content-disposition"].endswith('filename="FamilyTime-setup.cmd"')
+    cmd = r.content.decode("ascii")
+    assert "\r\n" in cmd and 'set "FT_URL=https://kids.example.com"' in cmd
+    code = re.search(r'set "FT_CODE=([A-Z0-9-]+)"', cmd).group(1)
+    assert re.fullmatch(r"[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}", code)
+    info = c.get(f"/agent/latest?code={code}").json()
+    assert info["code_ok"] is True and info["mode"] == "control"
+    assert c.get("/agent/latest?code=AAAA-BBBB-CCCC").json()["code_ok"] is False
+    # регистрация по коду: сразу в семье мамы
+    r = c.post("/api/agent/enroll", json={"hostname": "home-pc", "secret": code.lower().replace("-", " ")})
+    assert r.status_code == 200
+    fam = run_sql("SELECT family_id FROM ft_children WHERE username='ivan'", fetch=True)[0]["family_id"]
+    dev = run_sql("SELECT family_id, mode FROM ft_devices WHERE hostname='home-pc'", fetch=True)[0]
+    assert dev["family_id"] == fam and dev["mode"] == "control"
+    assert "home-pc" in c.get("/devices").text
+    assert run_sql("SELECT uses FROM ft_install_codes", fetch=True)[0]["uses"] == 1
+    # неверный код и чужая семья
+    assert c.post("/api/agent/enroll", json={"hostname": "x", "secret": "ZZZZ-ZZZZ-ZZZZ"}).status_code == 403
+    t2 = login(c, "stranger")
+    assert c.post("/devices/installer", data={"csrf": t2, "family_id": str(fam)}).status_code in (303, 403)
+    # отозванный код не работает
+    t = login(c, "mom")
+    cid = run_sql("SELECT id FROM ft_install_codes", fetch=True)[0]["id"]
+    assert "Код отозван" in c.post(f"/devices/codes/{cid}/revoke", data={"csrf": t}).text
+    assert c.post("/api/agent/enroll", json={"hostname": "y", "secret": code}).status_code == 403
+    # общий секрет (GPO) по-прежнему работает
+    assert c.post("/api/agent/enroll", json={"hostname": "dom-pc", "secret": "enroll"}).status_code == 200
+
+
+def test_agent_auto_update_offer(env):
+    c, _ = env
+    ta = login(c, "root", admin=True)
+    c.post("/settings/agent", data={"csrf": ta}, files={"package": ("p.zip", _package("1.4.1"), "application/zip")})
+    h = enroll(c)
+    hb = lambda ver, caps: c.post("/api/agent/heartbeat", headers=h, json={  # noqa: E731
+        "seq": 1, "caps": caps, "agent_version": ver}).json()
+    up = hb("1.4.0", ["lists", "userlists", "update"])["update"]
+    assert up["version"] == "1.4.1" and up["url"] == "/agent/package.zip" and len(up["sha256"]) == 64
+    assert "update" not in hb("1.4.1", ["lists", "userlists", "update"])
+    assert "update" not in hb("1.5.0", ["lists", "userlists", "update"])
+    assert "update" not in hb("1.3.0", ["lists", "userlists"])       # старый агент не умеет
+    # выключено в настройках
+    c.post("/settings", data={"csrf": ta, "only": "auto_update", "auto_update": ""})
+    assert "update" not in hb("1.4.0", ["lists", "userlists", "update"])
+    # хранятся три последние версии
+    for v in ("1.4.2", "1.4.10", "1.5.0"):
+        c.post("/settings/agent", data={"csrf": ta}, files={"package": ("p.zip", _package(v), "application/zip")})
+    vers = sorted(r["version"] for r in run_sql("SELECT version FROM ft_agent_packages", fetch=True))
+    assert vers == ["1.4.10", "1.4.2", "1.5.0"]
+    assert c.get("/agent/latest").json()["version"] == "1.5.0"
