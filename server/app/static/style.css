@@ -75,3 +75,8 @@ label.block { display: block; margin: 10px 0 4px; font-weight: 600; }
 .hint { font-size: 13px; color: var(--muted); margin-top: 4px; }
 .cols { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
 @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } .big { font-size: 28px; } }
+
+/* вкладки администратора: семьи / компании */
+header.top .tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 2px; }
+header.top .tabs a { text-decoration: none; color: var(--muted); padding: 3px 12px; border-radius: 999px; font-size: 14px; }
+header.top .tabs a.on { background: var(--accent); color: #fff; }

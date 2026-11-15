@@ -129,7 +129,8 @@ OLD_AGENT_LIMIT = 5000      # агентам 1.0.x списки идут в ка
 def restricted_domains(cfg, eff: dict) -> list[str]:
     """Открытые в режиме «только учёба»: протоколы (telemost:*), портал и Keycloak, учебные."""
     out: list[str] = [f"{sch}:*" for sch in eff.get("edu_schemes", [])]
-    for extra in [_host(cfg.public_url), _host(cfg.oidc_issuer), *cfg.extra_allowed_domains]:
+    for extra in [_host(cfg.public_url), *cfg.company_hosts, _host(cfg.oidc_issuer),
+                  *cfg.extra_allowed_domains]:
         extra = policy.norm_domain(extra)
         if extra and extra not in out:
             out.append(extra)
@@ -148,7 +149,8 @@ def lists_payload(cfg, eff: dict, limit: int | None = None) -> dict:
     }
 
 
-def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_set: dict | None = None) -> dict:
+def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_set: dict | None = None,
+                  kind: str = "family") -> dict:
     """Политика компьютера. Агент 1.2 (caps userlists) берёт списки, простой и предупреждения
     из политики ребёнка; агентам 1.1 и 1.0 отдаётся один набор на компьютер — объединение
     по детям его семьи (union)."""
@@ -167,7 +169,7 @@ def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_s
         "idle_minutes": int(cs["idle_minutes"]),
         "warn_minutes": [int(x) for x in cs["warn_minutes"]],
         "location_interval": max(60, int(interval) * 60),
-        "portal_url": cfg.public_url,
+        "portal_url": cfg.company_url if kind == "company" else cfg.public_url,
         "ext_ip_url": cfg.ext_ip_url,
         "lost": {
             "on": dev["lost"],
@@ -355,12 +357,14 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
         union = None if "userlists" in body.caps \
             else await lists.effective_union(conn, dev["family_id"])
         child_set = policy.child_settings(kids[cur_child]["settings"]) if cur_child else None
+        kind = await conn.fetchval("SELECT kind FROM ft_families WHERE id = $1",
+                                   dev["family_id"]) or "family"
     return {
         "server_time": now.timestamp(),
         "utc_offset": int(now_local.utcoffset().total_seconds()),
         "accepted": accepted,
         "seq": body.seq,
-        "device": device_policy(cfg, dev, settings, union, body.caps, child_set),
+        "device": device_policy(cfg, dev, settings, union, body.caps, child_set, kind),
         "users": policies,
     }
 

@@ -55,7 +55,6 @@ DEFAULT_SETTINGS: dict = {
     # известные адреса: [{"net": "203.0.113.5/32", "lat": .., "lon": .., "accuracy": 50, "name": "Дом"}]
     "ip_locations": [],
     "jitter": True,               # разброс точек в Traccar в пределах точности
-    "portal_terms": "family",     # слова на страницах портала: family | company
     "phone_ids": [],              # Traccar Client, чьим точкам можно уточнять место по сети
     "phone_minutes": 30,          # насколько свежей должна быть точка телефона
     "phone_max_accuracy": 100,    # м: менее точные точки телефона не используются
@@ -96,6 +95,29 @@ def family_messages(stored: dict | None, kind: str = "family") -> dict:
     out = {k: base[k] for k in FAMILY_MESSAGE_KEYS}
     out.update({k: v for k, v in (stored or {}).items() if k in out and v})
     return out
+
+
+# новый сотрудник компании: рабочие программы вместо учебных, без учебных сайтов,
+# мессенджеры не закрываются (они рабочие)
+COMPANY_CHILD_DEFAULTS = {
+    "edu_apps": [
+        "winword.exe", "excel.exe", "powerpnt.exe", "onenote.exe", "outlook.exe", "olk.exe",
+        "ms-teams.exe", "teams.exe", "msteams.exe", "notepad.exe", "acrord32.exe", "acrobat.exe",
+        "1cv8.exe", "1cv8c.exe", "code.exe", "calc.exe", "calculatorapp.exe", "mspaint.exe",
+        "snippingtool.exe", "mstsc.exe", "zoom.exe", "telemost.exe", "yandexmessenger.exe",
+    ],
+    "edu_domains": [],
+    "restricted_kill": ["steam.exe", "epicgameslauncher.exe", "discord.exe"],
+}
+# личное время 60 минут в день, без ограничений по часам
+COMPANY_RULES = [(60, None, None)] * 7
+
+
+def child_defaults(kind: str) -> dict:
+    st = child_settings({})
+    if kind == "company":
+        st.update(copy.deepcopy(COMPANY_CHILD_DEFAULTS))
+    return st
 
 
 DEFAULT_RULES = [

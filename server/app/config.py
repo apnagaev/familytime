@@ -97,6 +97,17 @@ class Config:
             dev_login=_bool("DEV_LOGIN"),
         )
 
+    def base_url(self, host: str | None = None) -> str:
+        """Адрес портала для запроса: сайт компании из COMPANY_HOSTS — он сам, иначе PUBLIC_URL."""
+        h = (host or "").split(":")[0].lower()
+        if h and h in self.company_hosts:
+            return "https://" + h
+        return self.public_url
+
+    @property
+    def company_url(self) -> str:
+        return ("https://" + self.company_hosts[0]) if self.company_hosts else self.public_url
+
     def check(self) -> list[str]:
         problems = []
         for name in ("database_url", "public_url", "session_secret", "enroll_secret"):

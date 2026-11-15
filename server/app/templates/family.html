@@ -10,15 +10,16 @@
     <input type="text" name="name" value="{{ f.name }}" style="font-size: 18px; font-weight: 600">
     <button class="ghost">Переименовать</button>
   </form>
+  {% if user.admin %}
   <form method="post" action="/family/{{ f.id }}" class="row" style="margin-top: 6px">
     <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="kind">
-    <label class="small">Тип <select name="kind" onchange="this.form.submit()">
-      <option value="family" {{ 'selected' if f.kind == 'family' }}>семья: дети и учёба</option>
-      <option value="company" {{ 'selected' if f.kind == 'company' }}>компания: сотрудники и работа</option>
+    <label class="small">Тип <select name="kind">
+      {% for k, label in kind_options.items() %}<option value="{{ k }}" {{ 'selected' if f.kind == k }}>{{ label }}</option>{% endfor %}
     </select></label>
-    <noscript><button class="ghost">Сохранить</button></noscript>
+    <button class="ghost">Сменить тип</button>
   </form>
-  <p class="hint">Тип меняет тексты по умолчанию, которые видят на компьютерах. Слова на страницах портала задаёт администратор в общих настройках или имя сайта.</p>
+  <p class="hint">Тип задаёт, как выглядит портал у её родителей и детей, тексты на компьютерах и значения по умолчанию для новых. Группа перейдёт на другую вкладку.</p>
+  {% endif %}
 
   <label class="block">Дети</label>
   <div class="row">

@@ -25,6 +25,9 @@ TEMPLATE_DIR = str(Path(__file__).with_name("templates"))
 # «компания»: те же страницы, другие слова. Замена делается в тексте шаблонов при загрузке,
 # поэтому данные пользователей (имена, сайты), подставленные в шаблон, не затрагиваются.
 COMPANY_WORDS = [
+    # фразы — раньше отдельных слов
+    ("Привет", "Здравствуйте"), ("Хватит на сегодня", "Завершить день"),
+    ("Попросить ещё времени", "Запросить личное время"),
     ("семьёй", "компанией"), ("семьей", "компанией"), ("семьи", "компании"), ("семью", "компанию"),
     ("семье", "компании"), ("семей", "компаний"), ("семья", "компания"),
     ("ребёнком", "сотрудником"), ("ребёнку", "сотруднику"), ("ребёнка", "сотрудника"),
@@ -130,17 +133,32 @@ async def family_access(conn, u: auth.User, family_id: int):
     return rows[0]
 
 
+KIND_LABELS = {"family": "Семьи", "company": "Компании"}
+KIND_OPTIONS = {"family": "семья: родители, дети, учёба",
+                "company": "компания: руководители, сотрудники, работа"}
+
+
+def current_kind(request: Request) -> str:
+    return getattr(request.state, "kind", "family")
+
+
 def is_company(request: Request) -> bool:
-    """Слова «компании»: по имени сайта (COMPANY_HOSTS), иначе по общей настройке."""
-    cfg = request.app.state.cfg
-    host = (request.headers.get("host") or "").split(":")[0].lower()
-    if cfg.company_hosts:
-        return host in cfg.company_hosts
-    return getattr(request.state, "portal_terms", "family") == "company"
+    return current_kind(request) == "company"
+
+
+async def list_scope(conn, u: auth.User, request: Request) -> list[int]:
+    """Семьи на страницах-списках: у администратора — все семьи выбранной вкладки,
+    у родителя — его семьи."""
+    if u.admin:
+        return [r["id"] for r in await conn.fetch(
+            "SELECT id FROM ft_families WHERE kind = $1", current_kind(request))]
+    return await db.parent_families(conn, u.username)
 
 
 def page(request: Request, name: str, user: auth.User | None, **ctx) -> HTMLResponse:
-    ctx.update(request=request, user=user, cfg=request.app.state.cfg,
+    # подписи вкладок и типов — из кода, чтобы замена слов «компании» их не трогала
+    ctx.update(request=request, user=user, cfg=request.app.state.cfg, kind=current_kind(request),
+               kind_labels=KIND_LABELS, kind_options=KIND_OPTIONS,
                flash=request.query_params.get("ok", ""), err=request.query_params.get("err", ""))
     t = company_templates if is_company(request) else templates
     return t.TemplateResponse(request, name, ctx)
@@ -232,6 +250,19 @@ async def logout(request: Request):
     return await auth.logout_redirect(request)
 
 
+@router.get("/kind/{kind}")
+async def switch_kind(request: Request, kind: str, back_to: str = "/dashboard"):
+    """Вкладка администратора: семьи или компании."""
+    need_admin(request)
+    if kind not in KIND_LABELS:
+        raise HTTPException(404)
+    resp = RedirectResponse(back_to if back_to.startswith("/") and not back_to.startswith("//")
+                            else "/dashboard", 303)
+    resp.set_cookie("ft_kind", kind, max_age=365 * 86400, httponly=True, samesite="lax",
+                    secure=request.app.state.cfg.public_url.startswith("https://"))
+    return resp
+
+
 @router.get("/")
 async def home(request: Request):
     u = need_user(request)
@@ -275,17 +306,14 @@ async def me_request(request: Request, minutes: int = Form(...), reason: str = F
 async def dashboard(request: Request):
     u = need_parent(request)
     async with request.app.state.pool.acquire() as conn:
-        fams = await scope(conn, u)
+        fams = await list_scope(conn, u, request)
         families = await db.list_families(conn, fams)
         fam_names = {f["id"]: f["name"] for f in families}
         rows = [await child_view(conn, request, c)
                 for c in await db.list_children(conn, families=fams)]
-        if fams is None:
-            pending = await conn.fetchval("SELECT count(*) FROM ft_requests WHERE status = 'pending'")
-        else:
-            pending = await conn.fetchval(
-                """SELECT count(*) FROM ft_requests r JOIN ft_children c USING (username)
-                   WHERE r.status = 'pending' AND c.family_id = ANY($1::bigint[])""", fams)
+        pending = await conn.fetchval(
+            """SELECT count(*) FROM ft_requests r JOIN ft_children c USING (username)
+               WHERE r.status = 'pending' AND c.family_id = ANY($1::bigint[])""", fams)
     return page(request, "dashboard.html", u, rows=rows, pending=pending, families=families,
                 fam_names=fam_names)
 
@@ -304,17 +332,20 @@ async def children_add(request: Request, username: str = Form(...), display_name
                 # чужого ребёнка «добавлением» забрать нельзя
                 return back("/dashboard", err=f"Логин {username} уже добавлен. Если это ваш "
                                               "ребёнок в другой семье, обратитесь к администратору")
-            fams = await scope(conn, u)
+            fams = await list_scope(conn, u, request)
+            kind = current_kind(request)
             fid = int(family_id) if family_id.strip().isdigit() else None
             if fid is not None:
                 await family_access(conn, u, fid)
             elif fams:
                 fid = fams[0]
-            elif fams is None:
-                first = await db.list_families(conn)
-                fid = first[0]["id"] if first else await db.create_family(conn, "Семья")
+            elif u.admin:                           # во вкладке ещё нет ни одной группы
+                fid = await db.create_family(
+                    conn, "Компания" if kind == "company" else "Семья", None, kind)
             else:                                   # у родителя ещё нет семьи — создаём
-                fid = await db.create_family(conn, f"Семья {u.name}", u.username)
+                fid = await db.create_family(
+                    conn, f"{'Компания' if kind == 'company' else 'Семья'} {u.name}",
+                    u.username, kind)
             await db.add_child(conn, username, display_name or username, fid)
     return back(f"/child/{username}", ok="Добавлено. Проверьте правила по дням и настройки")
 
@@ -331,7 +362,9 @@ async def child_page(request: Request, username: str):
             "SELECT id, category, name, url, enabled, interval_hours, count, last_fetch, last_ok, "
             "error FROM ft_lists WHERE username = $1 ORDER BY category, id", child["username"])
         others = [c for c in await db.list_children(conn, families=fams)
-                  if c["username"] != child["username"]]
+                  if c["username"] != child["username"]
+                  and (not u.admin or c["family_id"] == child["family_id"]
+                       or c["family_id"] in await list_scope(conn, u, request))]
         families = await db.list_families(conn, fams)
     return page(request, "child.html", u, **v, s=policy.child_settings(child["settings"]),
                 subs=subs, counts=lists.counts(eff), categories=lists.CATEGORIES,
@@ -575,7 +608,7 @@ async def sub_action(request: Request, username: str, list_id: int, action: str 
 async def family_page(request: Request):
     u = need_parent(request)
     async with request.app.state.pool.acquire() as conn:
-        fams = await scope(conn, u)
+        fams = await list_scope(conn, u, request)
         families = await db.list_families(conn, fams)
         kids = await db.list_children(conn, families=fams)
         orphans = [c for c in await db.list_children(conn) if c["family_id"] is None] \
@@ -590,8 +623,8 @@ async def family_create(request: Request, name: str = Form(...), parent: str = F
     u = need_admin(request)
     auth.check_csrf(request, u, csrf)
     async with request.app.state.pool.acquire() as conn:
-        await db.create_family(conn, name, norm_login(parent) or None)
-    return back("/family", ok="Семья создана")
+        await db.create_family(conn, name, norm_login(parent) or None, current_kind(request))
+    return back("/family", ok="Создано")
 
 
 @router.post("/family/{family_id}")
@@ -606,9 +639,14 @@ async def family_save(request: Request, family_id: int):
             await conn.execute("UPDATE ft_families SET name = $2 WHERE id = $1", family_id,
                                str(form.get("name", "")).strip()[:100] or fam["name"])
         elif section == "kind":
+            if not u.admin:
+                raise HTTPException(403, "Тип меняет только администратор")
             kind = str(form.get("kind", "family"))
             await conn.execute("UPDATE ft_families SET kind = $2 WHERE id = $1", family_id,
                                kind if kind in policy.FAMILY_KINDS else "family")
+            request.app.state.kind_cache.clear()
+            return back("/family", ok="Тип изменён: группа теперь на вкладке «"
+                                      + KIND_LABELS.get(kind, "Семьи") + "»")
         elif section == "messages":
             msgs = {k: str(form.get(k, "")).strip()[:1000] for k in policy.FAMILY_MESSAGE_KEYS}
             await conn.execute("UPDATE ft_families SET messages = $2 WHERE id = $1", family_id,
@@ -677,19 +715,15 @@ async def settings_save(request: Request):
     except ValueError:
         return back("/settings", err="Неверное число")
     phone_ids = [x for x in re.split(r"[\s,;]+", str(form.get("phone_ids", "")).strip()) if x][:100]
-    terms = str(form.get("portal_terms", "family"))
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
         await db.set_setting(conn, "jitter", form.get("jitter") == "1", u.username)
         await db.set_setting(conn, "phone_ids", phone_ids, u.username)
         await db.set_setting(conn, "phone_minutes", phone_minutes, u.username)
         await db.set_setting(conn, "phone_max_accuracy", phone_acc, u.username)
-        await db.set_setting(conn, "portal_terms",
-                             terms if terms in policy.FAMILY_KINDS else "family", u.username)
         await db.set_setting(conn, "ip_locations", known[:500], u.username)
         await db.set_setting(conn, "location", loc, u.username)
         await db.set_setting(conn, "messages", {**s["messages"], "lost": lost}, u.username)
-    request.app.state.terms_cache["at"] = -1e9
     return back("/settings", ok="Сохранено. Компьютеры получат изменения в течение минуты")
 
 
@@ -707,13 +741,12 @@ async def device_access(conn, u: auth.User, dev_id: UUID):
 async def devices_page(request: Request):
     u = need_parent(request)
     async with request.app.state.pool.acquire() as conn:
-        fams = await scope(conn, u)
-        if fams is None:
-            devs = await conn.fetch("SELECT * FROM ft_devices ORDER BY hostname")
-        else:
-            devs = await conn.fetch(
-                "SELECT * FROM ft_devices WHERE family_id = ANY($1::bigint[]) ORDER BY hostname", fams)
-        families = await db.list_families(conn, fams)
+        fams = await list_scope(conn, u, request)
+        # компьютеры без группы видит только администратор, на обеих вкладках
+        devs = await conn.fetch(
+            """SELECT * FROM ft_devices WHERE family_id = ANY($1::bigint[])
+               OR ($2 AND family_id IS NULL) ORDER BY hostname""", fams, u.admin)
+        families = await db.list_families(conn, None if u.admin else fams)
     return page(request, "devices.html", u, devices=devs, families=families,
                 fam_names={f["id"]: f["name"] for f in families}, now=datetime.now(timezone.utc))
 
@@ -753,13 +786,11 @@ async def device_delete(request: Request, dev_id: UUID, csrf: str = Form("")):
 async def requests_page(request: Request):
     u = need_parent(request)
     async with request.app.state.pool.acquire() as conn:
-        fams = await scope(conn, u)
-        q = """SELECT r.*, c.display_name FROM ft_requests r JOIN ft_children c USING (username)
-               {where} ORDER BY (r.status = 'pending') DESC, r.created_at DESC LIMIT 50"""
-        if fams is None:
-            rows = await conn.fetch(q.format(where=""))
-        else:
-            rows = await conn.fetch(q.format(where="WHERE c.family_id = ANY($1::bigint[])"), fams)
+        fams = await list_scope(conn, u, request)
+        rows = await conn.fetch(
+            """SELECT r.*, c.display_name FROM ft_requests r JOIN ft_children c USING (username)
+               WHERE c.family_id = ANY($1::bigint[])
+               ORDER BY (r.status = 'pending') DESC, r.created_at DESC LIMIT 50""", fams)
     return page(request, "requests.html", u, rows=rows)
 
 

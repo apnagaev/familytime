@@ -202,13 +202,82 @@ def test_company_wording(env):
     assert "Компания" in fam or "компания" in fam
 
 
-def test_company_wording_switch_without_hosts(env):
+def test_admin_tabs_split_families_and_companies(env):
     c, _ = env
     c.app.state.cfg.company_hosts = []
     t = login(c, "boss", admin=True)
-    assert "Добавить ребёнка" in c.get("/dashboard").text
-    c.post("/settings", data={"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2",
-                              "portal_terms": "company"})
     page = c.get("/dashboard").text
-    assert "Добавить сотрудника" in page and "Сотрудники" in page
-    assert "Руководители" in c.get("/family").text or "руководител" in c.get("/family").text
+    assert 'href="/kind/company' in page and "Добавить ребёнка" in page
+    c.post("/children", data={"username": "masha", "display_name": "Маша", "csrf": t})
+    # вкладка «Компании»: своя группа, свои слова, чужих детей не видно
+    r = c.get("/kind/company?back_to=/dashboard", follow_redirects=False)
+    assert r.status_code in (302, 303) and r.headers["location"] == "/dashboard"
+    page = c.get("/dashboard").text
+    assert "Добавить сотрудника" in page and "Маша" not in page
+    c.post("/children", data={"username": "ivanov", "display_name": "Иван", "csrf": t})
+    kinds = {r["username"]: r["kind"] for r in run_sql(
+        "SELECT c.username, f.kind FROM ft_children c JOIN ft_families f ON f.id=c.family_id", fetch=True)}
+    assert kinds == {"masha": "family", "ivanov": "company"}
+    assert "Иван" in page or "Иван" in c.get("/dashboard").text
+    # сотруднику — рабочие умолчания
+    rules = run_sql("SELECT limit_minutes FROM ft_rules WHERE username='ivanov'", fetch=True)
+    assert len(rules) == 7 and all(r["limit_minutes"] == 60 for r in rules)
+    edu = run_sql("SELECT settings FROM ft_children WHERE username='ivanov'", fetch=True)[0]["settings"]
+    assert "outlook" in json.dumps(edu, ensure_ascii=False).lower()
+    # назад на «Семьи»
+    c.get("/kind/family?back_to=/dashboard")
+    page = c.get("/dashboard").text
+    assert "Маша" in page and "Иван" not in page
+    # страницы ошибок у администратора рисуются с вкладками
+    r = c.get("/no-such-page")
+    assert r.status_code == 404 and 'href="/kind/company' in r.text
+    # открытый путь /kind/ не даёт уйти на чужой сайт
+    r = c.get("/kind/family?back_to=https://evil.example.org/", follow_redirects=False)
+    assert r.headers["location"].startswith("/")
+
+
+def test_kind_is_admin_only(env):
+    c, _ = env
+    c.app.state.cfg.company_hosts = []
+    t = login(c, "mom")
+    c.post("/children", data={"username": "masha", "display_name": "Маша", "csrf": t})
+    fid = run_sql("SELECT id FROM ft_families", fetch=True)[0]["id"]
+    fam = c.get("/family").text
+    assert 'name="section" value="kind"' not in fam and 'href="/kind/' not in c.get("/dashboard").text
+    r = c.post(f"/family/{fid}", data={"section": "kind", "kind": "company", "csrf": t})
+    assert r.status_code == 403
+    assert run_sql("SELECT kind FROM ft_families", fetch=True)[0]["kind"] == "family"
+    assert c.get("/kind/company", follow_redirects=False).status_code == 403
+
+
+def test_company_people_see_company_ui_on_any_host(env):
+    c, _ = env
+    c.app.state.cfg.company_hosts = ["work.example.com"]
+    t = login(c, "boss", admin=True)
+    c.get("/kind/company")
+    c.post("/children", data={"username": "ivanov", "display_name": "Иван", "csrf": t})
+    fid = run_sql("SELECT id FROM ft_families", fetch=True)[0]["id"]
+    run_sql("INSERT INTO ft_family_parents(family_id, username) VALUES ($1, 'chief')", fid)
+    # руководитель на «семейном» адресе — всё равно рабочие слова
+    login(c, "chief")
+    page = c.get("/dashboard").text
+    assert "Добавить сотрудника" in page and "ребёнка" not in page
+    # сотрудник
+    c.cookies.clear()
+    c.get("/dev-login?u=ivanov&parent=&admin=", follow_redirects=False)
+    page = c.get("/", follow_redirects=True).text
+    assert "ребён" not in page.lower()
+    # агент получает адрес рабочего портала
+    p = c.post("/api/agent/heartbeat", headers=enroll(c), json={
+        "seq": 1, "caps": ["userlists"], "user": "ivanov"}).json()
+    assert "work.example.com" in json.dumps(p)
+
+
+def test_base_url_by_host():
+    cfg = Config(database_url=DSN, public_url="https://kids.example.com", session_secret="s" * 32,
+                 enroll_secret="e", company_hosts=["work.example.com"])
+    assert cfg.base_url("work.example.com:443") == "https://work.example.com"
+    assert cfg.base_url("kids.example.com") == "https://kids.example.com"
+    assert cfg.base_url("evil.example.org") == "https://kids.example.com"
+    assert cfg.company_url == "https://work.example.com"
+
