@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from . import auth
 from .portal import back, list_scope, need_admin, need_parent
@@ -108,11 +108,12 @@ def inspect_zip(data: bytes) -> str:
         z = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
         raise ValueError("это не zip-архив") from None
-    names = {n.replace("\\", "/") for n in z.namelist()}
+    # Compress-Archive в Windows PowerShell 5.1 пишет пути с обратной косой чертой
+    names = {n.replace("\\", "/").lstrip("/"): n for n in z.namelist()}
     for need in ("install.ps1", "FamilyTime/familytime-agent.exe", "FamilyTime/version.txt"):
         if need not in names:
             raise ValueError(f"в архиве нет {need} — нужен FamilyTime-<версия>.zip из build.ps1")
-    ver = z.read("FamilyTime/version.txt").decode("utf-8-sig", "replace").strip()
+    ver = z.read(names["FamilyTime/version.txt"]).decode("utf-8-sig", "replace").strip()
     if not re.fullmatch(r"\d+(\.\d+){1,3}", ver):
         raise ValueError(f"непонятная версия в version.txt: {ver[:20]!r}")
     return ver
@@ -153,7 +154,8 @@ async def agent_latest(request: Request, code: str = ""):
         out["code_ok"] = bool(row)
         if row:
             out.update(family=row["family_name"] or "", mode=row["mode"])
-    return out
+    # charset явно: PowerShell 5.1 без него читает ответ как Latin-1
+    return JSONResponse(out, media_type="application/json; charset=utf-8")
 
 
 @router.get("/agent/package.zip")
@@ -180,22 +182,33 @@ async def agent_upload(request: Request, package: UploadFile = File(...), csrf: 
         ver = inspect_zip(data)
     except ValueError as e:
         return back("/settings", err=f"Пакет не принят: {e}")
+    except Exception as e:  # noqa: BLE001 — понятная ошибка вместо Internal Server Error
+        log.exception("пакет агента: разбор архива")
+        return back("/settings", err=f"Пакет не принят: не удалось разобрать архив ({e})")
     sha = hashlib.sha256(data).hexdigest()
+    try:
+        await _store_package(request, ver, sha, data, u.username)
+    except Exception as e:  # noqa: BLE001
+        log.exception("пакет агента: запись в базу")
+        return back("/settings", err=f"Пакет {ver} не сохранён: {type(e).__name__}: {e}"[:300])
+    request.app.state.agent_pkg = None
+    log.info("загружен пакет агента %s (%d байт) — %s", ver, len(data), u.username)
+    return back("/settings", ok=f"Агент {ver} загружен. Компьютеры с агентом 1.4 и новее "
+                               "обновятся сами в течение нескольких минут")
+
+
+async def _store_package(request: Request, ver: str, sha: str, data: bytes, who: str) -> None:
     async with request.app.state.pool.acquire() as conn:
         await conn.execute(
             """INSERT INTO ft_agent_packages (version, sha256, size, data, uploaded_by)
                VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (version) DO UPDATE SET sha256 = EXCLUDED.sha256, size = EXCLUDED.size,
                data = EXCLUDED.data, uploaded_at = now(), uploaded_by = EXCLUDED.uploaded_by""",
-            ver, sha, len(data), data, u.username)
+            ver, sha, len(data), data, who)
         rows = await conn.fetch("SELECT version FROM ft_agent_packages")
         old = sorted((r["version"] for r in rows), key=vtuple)[:-KEEP_PACKAGES]
         if old:
             await conn.execute("DELETE FROM ft_agent_packages WHERE version = ANY($1::text[])", old)
-    request.app.state.agent_pkg = None
-    log.info("загружен пакет агента %s (%d байт) — %s", ver, len(data), u.username)
-    return back("/settings", ok=f"Агент {ver} загружен. Компьютеры с агентом 1.4 и новее "
-                               "обновятся сами в течение нескольких минут")
 
 
 @router.post("/devices/installer")

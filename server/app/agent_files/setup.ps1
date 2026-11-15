@@ -36,8 +36,10 @@ function Install-FamilyTime {
     $sameServer = $old -and $old.server_url -and ("$($old.server_url)".TrimEnd("/") -eq $url)
 
     Say "Проверяю портал..."
+    $wc = New-Object Net.WebClient
+    $wc.Encoding = [Text.Encoding]::UTF8          # Invoke-RestMethod в PowerShell 5.1 читает JSON как Latin-1
     try {
-        $info = Invoke-RestMethod "$url/agent/latest?code=$([uri]::EscapeDataString($code))" -UseBasicParsing
+        $info = $wc.DownloadString("$url/agent/latest?code=$([uri]::EscapeDataString($code))") | ConvertFrom-Json
     } catch {
         return Fail "портал $url недоступен: $($_.Exception.Message). Проверьте интернет и попробуйте ещё раз."
     }
@@ -67,22 +69,29 @@ function Install-FamilyTime {
         }
     }
 
-    $tmp = Join-Path $env:TEMP ("FamilyTime-setup-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    # не %TEMP%: у учётной записи с русским именем он бывает в коротком виде (C:\Users\0737~1\...),
+    # и такой путь не находится; папка в ProgramData — всегда латиницей и длинным именем
+    $tmp = Join-Path $env:ProgramData ("FamilyTime-setup-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Force $tmp | Out-Null
+    $tmp = (Get-Item -LiteralPath $tmp).FullName
     try {
         $zip = Join-Path $tmp "FamilyTime.zip"
         Say ("Скачиваю FamilyTime {0} ({1:N0} МБ)..." -f $info.version, ($info.size / 1MB))
-        $wc = New-Object Net.WebClient
         $wc.DownloadFile("$url/agent/package.zip", $zip)
         $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
         if ($sha -ne $info.sha256) { return Fail "файл скачался с ошибкой (контрольная сумма не совпала). Попробуйте ещё раз." }
         Say "Распаковываю..."
         $pkg = Join-Path $tmp "pkg"
-        Expand-Archive $zip $pkg -Force
+        Expand-Archive -LiteralPath $zip -DestinationPath $pkg -Force
+        if (-not (Test-Path -LiteralPath (Join-Path $pkg "install.ps1"))) { return Fail "в скачанном пакете нет install.ps1." }
         Say "Устанавливаю службу..."
+        # вывод установщика — на экран; его сообщения в stderr не должны обрывать этот сценарий
+        $ErrorActionPreference = "Continue"
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pkg "install.ps1") `
-            -Source $pkg -ServerUrl $url -EnrollSecret $secret -Mode $mode
-        if ($LASTEXITCODE -ne 0) { return Fail "установка завершилась с ошибкой." }
+            -Source $pkg -ServerUrl $url -EnrollSecret $secret -Mode $mode 2>&1 | ForEach-Object { Say "  $_" DarkGray }
+        $rc = $LASTEXITCODE
+        $ErrorActionPreference = "Stop"
+        if ($rc -ne 0) { return Fail "установка завершилась с ошибкой (код $rc)." }
     } finally {
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
