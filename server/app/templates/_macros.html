@@ -1,5 +1,6 @@
 {% macro status_pill(st) -%}
-  {%- if st.mode == 'blocked' -%}<span class="pill bad">компьютер заблокирован</span>
+  {%- if st.mode == 'blocked' and st.reason == 'manual' -%}<span class="pill bad">заблокирован до {{ fmt_time(st.lock_until.time()) }}</span>
+  {%- elif st.mode == 'blocked' -%}<span class="pill bad">компьютер заблокирован</span>
   {%- elif st.mode == 'restricted' and st.reason == 'window' -%}<span class="pill warn">только учёба: вне свободного времени</span>
   {%- elif st.mode == 'restricted' -%}<span class="pill bad">время закончилось, только учёба</span>
   {%- elif st.limit_seconds is none -%}<span class="pill">без лимита</span>
@@ -44,4 +45,21 @@
       <div class="small">🟢 {{ p.hostname.split('.')[0] }}{% if p.session == 'locked' %} (заблокирован){% endif %}{% if p.domain %} · {{ p.domain }}{% elif p.app %} · {{ p.app }}{% elif p.exe %} · {{ p.exe }}{% endif %}</div>
     {% endfor %}
   {% else %}<div class="small muted">Сейчас не за компьютером</div>{% endif %}
+{%- endmacro %}
+
+{% macro lock_form(child, st, ret, full=False) -%}
+  {% if st.reason == 'manual' %}
+  <form class="inline" method="post" action="/child/{{ child.username }}/unlock">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="ret" value="{{ ret }}">
+    <button>Разблокировать (до {{ fmt_time(st.lock_until.time()) }})</button>
+  </form>
+  {% else %}
+  <form class="inline" style="display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center" method="post" action="/child/{{ child.username }}/lock" onsubmit="return confirm('Заблокировать компьютер сейчас? Блокировка снимется сама в выбранное время.')">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="ret" value="{{ ret }}">
+    <select name="until" style="width: auto; min-width: 0">{% for k, label in LOCK_CHOICES.items() %}<option value="{{ k }}" {{ 'selected' if k == '60' }}>{{ label }}</option>{% endfor %}</select>
+    {% if full %}<label class="small">или до <input type="time" name="at"></label>
+    <input type="text" name="message" placeholder="сообщение на экране (необязательно)" style="flex: 1; min-width: 200px" maxlength="500">{% endif %}
+    <button class="danger">Заблокировать</button>
+  </form>
+  {% endif %}
 {%- endmacro %}

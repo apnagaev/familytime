@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import db, lists, locator, policy
+from . import db, dist, lists, locator, policy
 
 router = APIRouter(prefix="/api/agent")
 
@@ -193,12 +193,18 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
         "block_from": policy.fmt_time(rule.block_from),
         "block_to": policy.fmt_time(rule.block_to),
     }
+    if st["lock_until"]:
+        values["block_to"] = policy.fmt_time(_ceil_minute(st["lock_until"]).time())
     fam = await conn.fetchrow("SELECT messages, kind FROM ft_families WHERE id = $1",
                               child["family_id"])
     msgs = policy.family_messages(fam["messages"] if fam else None,
                                   fam["kind"] if fam else "family")
     cs = policy.child_settings(child["settings"])
     eff = await lists.effective(conn, child)
+    messages = {k: policy.render(msgs.get(k, ""), values)
+                for k in ("warn", "limit", "window", "block", "restricted")}
+    if st["lock_until"] and st["lock_message"]:
+        messages["block"] = policy.render(st["lock_message"], values)
     return {
         "child": True,
         "name": child["display_name"],
@@ -209,14 +215,13 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
         "counted_seconds": st["counted_seconds"],
         "remaining_seconds": st["remaining_seconds"],
         "window_change_in": st["window_change_in"],
-        "messages": {k: policy.render(msgs.get(k, ""), values)
-                     for k in ("warn", "limit", "window", "block", "restricted")},
+        "messages": messages,
         "lists_version": eff["version"],
         "restricted_kill": cs["restricted_kill"],
         "idle_minutes": int(cs["idle_minutes"]),
         "warn_minutes": [int(x) for x in cs["warn_minutes"]],
         # на случай работы без связи: правила недели, бонусы не учитываются
-        "rules": {
+        "rules": lock_rules({
             str(wd): {
                 "limit": r.limit_minutes,
                 "from": policy.fmt_time(r.window_from) or None,
@@ -224,29 +229,63 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
                 "block_from": policy.fmt_time(r.block_from) or None,
                 "block_to": policy.fmt_time(r.block_to) or None,
             } for wd, r in st["rules"].items()
-        },
+        }, now_local, st["lock_until"]),
     }
+
+
+def _ceil_minute(dt: datetime) -> datetime:
+    return dt if not (dt.second or dt.microsecond) else \
+        dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+
+
+def lock_rules(rules: dict, now_local: datetime, until: datetime | None) -> dict:
+    """Блокировка «прямо сейчас» как интервал блокировки в правилах сегодняшнего дня
+    (и завтрашнего до времени снятия, если через полночь). Так её выполняет любой агент,
+    в том числе без связи, и она снимается сама в назначенное время."""
+    if not until or until <= now_local:
+        return rules
+    start = now_local.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    end = _ceil_minute(until)
+    today = rules[str(now_local.weekday())]
+    if end.date() == now_local.date():
+        today.update(block_from=start.strftime("%H:%M"), block_to=end.strftime("%H:%M"))
+    else:
+        today.update(block_from=start.strftime("%H:%M"), block_to="00:00")
+        if end.time() != datetime.min.time():
+            rules[str(end.weekday())].update(block_from="00:00", block_to=end.strftime("%H:%M"))
+    return rules
 
 
 # ---------- обработчики ----------
 
 @router.post("/enroll")
 async def enroll(body: EnrollIn, request: Request):
+    """Регистрация: общий секрет (GPO, домен) или код установки родителя — тогда компьютер
+    сразу попадает в его семью с режимом из кода."""
     cfg = request.app.state.cfg
-    if not cfg.enroll_secret or not hmac.compare_digest(body.secret, cfg.enroll_secret):
-        raise HTTPException(403, "bad secret")
     hostname = body.hostname.strip().lower()
     mode = body.mode if body.mode in ("control", "track") else "control"
     token = secrets.token_urlsafe(32)
     async with request.app.state.pool.acquire() as conn:
+        code = None
+        if not cfg.enroll_secret or not hmac.compare_digest(body.secret, cfg.enroll_secret):
+            code = await dist.find_code(conn, body.secret)
+            if not code:
+                raise HTTPException(403, "bad secret")
+            mode = code["mode"]
         await conn.execute(
-            """INSERT INTO ft_devices (hostname, token_hash, mode, os_version, agent_version, last_ip)
-               VALUES ($1, $2, $3, $4, $5, $6)
+            """INSERT INTO ft_devices (hostname, token_hash, mode, os_version, agent_version, last_ip,
+                                       family_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
                ON CONFLICT (hostname) DO UPDATE SET token_hash = EXCLUDED.token_hash,
                  os_version = EXCLUDED.os_version, agent_version = EXCLUDED.agent_version,
-                 last_seq = 0""",
+                 last_seq = 0,
+                 mode = CASE WHEN $8 THEN EXCLUDED.mode ELSE ft_devices.mode END,
+                 family_id = CASE WHEN $8 THEN EXCLUDED.family_id ELSE ft_devices.family_id END""",
             hostname, token_hash(token), mode, body.os[:200], body.agent_version[:50],
-            client_ip(request))
+            client_ip(request), code["family_id"] if code else None, code is not None)
+        if code:
+            await dist.use_code(conn, code)
     return {"token": token, "hostname": hostname}
 
 
@@ -359,7 +398,8 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
         child_set = policy.child_settings(kids[cur_child]["settings"]) if cur_child else None
         kind = await conn.fetchval("SELECT kind FROM ft_families WHERE id = $1",
                                    dev["family_id"]) or "family"
-    return {
+        update = await dist.update_offer(conn, settings, body.caps, body.agent_version)
+    out = {
         "server_time": now.timestamp(),
         "utc_offset": int(now_local.utcoffset().total_seconds()),
         "accepted": accepted,
@@ -367,6 +407,9 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
         "device": device_policy(cfg, dev, settings, union, body.caps, child_set, kind),
         "users": policies,
     }
+    if update:
+        out["update"] = update
+    return out
 
 
 class ListsIn(BaseModel):

@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__, agent_api, auth, db, lists, phones, portal
+from . import __version__, agent_api, auth, db, dist, lists, phones, portal
 from .config import Config
 from .telegram import Telegram
 
@@ -49,6 +49,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(agent_api.router)
     app.include_router(phones.router)
+    app.include_router(dist.router)
     app.include_router(portal.router)
     app.mount("/static", StaticFiles(directory=str(Path(__file__).with_name("static"))), name="static")
 

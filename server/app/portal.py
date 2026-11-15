@@ -62,12 +62,18 @@ class CompanyLoader(FileSystemLoader):
         return company_text(src), path, uptodate
 
 
+def _vtuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4]) or (0,)
+
+
 def _templates(loader=None) -> Jinja2Templates:
     t = Jinja2Templates(env=Environment(loader=loader or FileSystemLoader(TEMPLATE_DIR),
                                         autoescape=True))
     t.env.globals.update(
         fmt=policy.fmt_minutes, fmt_time=policy.fmt_time, WEEKDAYS=policy.WEEKDAYS,
-        WEEKDAYS_SHORT=policy.WEEKDAYS_SHORT)
+        WEEKDAYS_SHORT=policy.WEEKDAYS_SHORT, vtuple=_vtuple,
+        LOCK_CHOICES={"30": "на 30 мин", "60": "на 1 ч", "120": "на 2 ч", "eod": "до конца дня",
+                      "morning": "до 7:00 утра"})
     return t
 
 
@@ -419,6 +425,60 @@ async def child_bonus(request: Request, username: str, minutes: int = Form(...),
     return back(ret if ret.startswith("/") else f"/child/{username}", ok=f"Сегодня {word} мин")
 
 
+def lock_until_from(choice: str, at: str, nl: datetime) -> datetime | None:
+    """Время снятия блокировки: пресет или «до ЧЧ:ММ» (сегодня, а если прошло — завтра)."""
+    if at:
+        try:
+            t = time.fromisoformat(at)
+        except ValueError:
+            return None
+        until = nl.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        return until if until > nl else until + timedelta(days=1)
+    if choice.isdigit():
+        return nl + timedelta(minutes=max(1, min(24 * 60, int(choice))))
+    midnight = nl.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    if choice == "eod":
+        return midnight
+    if choice == "morning":
+        seven = nl.replace(hour=7, minute=0, second=0, microsecond=0)
+        return seven if seven > nl else seven + timedelta(days=1)
+    return None
+
+
+@router.post("/child/{username}/lock")
+async def child_lock(request: Request, username: str, until: str = Form(""), at: str = Form(""),
+                     message: str = Form(""), csrf: str = Form(""), ret: str = Form("")):
+    """Заблокировать компьютер прямо сейчас; снимается само во время снятия."""
+    u = need_parent(request)
+    auth.check_csrf(request, u, csrf)
+    url = ret if ret.startswith("/") else f"/child/{username}"
+    nl = now_local(request)
+    end = lock_until_from(until, at.strip(), nl)
+    if not end:
+        return back(url, err="Не понял, до какого времени блокировать")
+    end = min(end, nl + timedelta(hours=24))
+    async with request.app.state.pool.acquire() as conn:
+        await child_access(conn, u, username)
+        await conn.execute(
+            "UPDATE ft_children SET lock_until = $2, lock_message = $3, lock_by = $4 "
+            "WHERE username = $1", username, end, message.strip()[:500], u.username)
+    when = policy.fmt_time(end.time()) + ("" if end.date() == nl.date() else " завтра")
+    return back(url, ok=f"Заблокировано до {when}. Компьютер заблокируется в течение минуты")
+
+
+@router.post("/child/{username}/unlock")
+async def child_unlock(request: Request, username: str, csrf: str = Form(""),
+                       ret: str = Form("")):
+    u = need_parent(request)
+    auth.check_csrf(request, u, csrf)
+    async with request.app.state.pool.acquire() as conn:
+        await child_access(conn, u, username)
+        await conn.execute("UPDATE ft_children SET lock_until = NULL WHERE username = $1",
+                           username)
+    return back(ret if ret.startswith("/") else f"/child/{username}",
+                ok="Блокировка снята, компьютер разблокируется в течение минуты")
+
+
 @router.post("/child/{username}/bonus/{bonus_id}/delete")
 async def child_bonus_delete(request: Request, username: str, bonus_id: int, csrf: str = Form(""),
                              ret: str = Form("")):
@@ -688,11 +748,13 @@ async def settings_page(request: Request):
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
         phones = await conn.fetch(
-            """SELECT device, net, max(at) AS at, count(*) AS n, min(accuracy) AS best
+            """SELECT device, net, place, max(at) AS at, count(*) AS n
                FROM ft_phone_fixes WHERE at > now() - interval '1 day'
-               GROUP BY device, net ORDER BY max(at) DESC LIMIT 20""")
+               GROUP BY device, net, place ORDER BY max(at) DESC LIMIT 20""")
+        from .dist import settings_extra
+        extra = await settings_extra(conn)
     return page(request, "settings.html", u, s=s, phones=phones,
-                ip_locations=locator.format_ip_locations(s["ip_locations"]))
+                ip_locations=locator.format_ip_locations(s["ip_locations"]), **extra)
 
 
 @router.post("/settings")
@@ -700,6 +762,10 @@ async def settings_save(request: Request):
     u = need_admin(request)
     form = await request.form()
     auth.check_csrf(request, u, str(form.get("csrf", "")))
+    if form.get("only") == "auto_update":
+        async with request.app.state.pool.acquire() as conn:
+            await db.set_setting(conn, "auto_update", form.get("auto_update") == "1", u.username)
+        return back("/settings", ok="Сохранено")
     try:
         loc = {"interval_minutes": max(1, min(240, int(form.get("interval_minutes", 15)))),
                "lost_interval_minutes": max(1, min(60, int(form.get("lost_interval_minutes", 2))))}
@@ -709,18 +775,11 @@ async def settings_save(request: Request):
     known, errors = locator.parse_ip_locations(str(form.get("ip_locations", "")))
     if errors:
         return back("/settings", err="Известные адреса, не разобрано: " + "; ".join(errors[:3]))
-    try:
-        phone_minutes = max(1, min(240, int(form.get("phone_minutes") or 30)))
-        phone_acc = max(5, min(1000, int(form.get("phone_max_accuracy") or 100)))
-    except ValueError:
-        return back("/settings", err="Неверное число")
     phone_ids = [x for x in re.split(r"[\s,;]+", str(form.get("phone_ids", "")).strip()) if x][:100]
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
         await db.set_setting(conn, "jitter", form.get("jitter") == "1", u.username)
         await db.set_setting(conn, "phone_ids", phone_ids, u.username)
-        await db.set_setting(conn, "phone_minutes", phone_minutes, u.username)
-        await db.set_setting(conn, "phone_max_accuracy", phone_acc, u.username)
         await db.set_setting(conn, "ip_locations", known[:500], u.username)
         await db.set_setting(conn, "location", loc, u.username)
         await db.set_setting(conn, "messages", {**s["messages"], "lost": lost}, u.username)
@@ -747,8 +806,12 @@ async def devices_page(request: Request):
             """SELECT * FROM ft_devices WHERE family_id = ANY($1::bigint[])
                OR ($2 AND family_id IS NULL) ORDER BY hostname""", fams, u.admin)
         families = await db.list_families(conn, None if u.admin else fams)
+        from .dist import devices_extra
+        extra = await devices_extra(conn, u, fams)
+        extra["install_families"] = [f for f in families if f["id"] in fams]
     return page(request, "devices.html", u, devices=devs, families=families,
-                fam_names={f["id"]: f["name"] for f in families}, now=datetime.now(timezone.utc))
+                fam_names={f["id"]: f["name"] for f in families}, now=datetime.now(timezone.utc),
+                **extra)
 
 
 @router.post("/devices/{dev_id}")

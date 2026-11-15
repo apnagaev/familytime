@@ -182,51 +182,16 @@ async def geoip(http: httpx.AsyncClient, cfg, ip: str) -> Fix | None:
     return Fix(float(lat), float(lon), GEOIP_ACCURACY, "geoip", str(d.get("city") or "")[:60])
 
 
-def net_key(ip: str) -> str:
-    """Ключ сети для сопоставления с телефонами: публичный адрес целиком, внутренний IPv4 —
-    его /24 (дома телефон и компьютер получают разные внутренние адреса одной сети)."""
-    try:
-        a = ipaddress.ip_address(ip)
-    except ValueError:
-        return ""
-    if public_ip(ip):
-        return str(a)
-    if a.version == 4 and a.is_private:
-        return str(ipaddress.ip_network(f"{a}/24", strict=False))
-    return ""
-
-
-async def phone_fix(conn, settings: dict, ips: list[str]) -> Fix | None:
-    """Свежая точная точка GPS телефона из той же сети (Traccar Client через FamilyTime)."""
-    keys = sorted({k for k in (net_key(i) for i in ips if i) if k})
-    if not keys:
-        return None
-    minutes = int(settings.get("phone_minutes") or 30)
-    row = await conn.fetchrow(
-        """SELECT lat, lon, accuracy, device FROM ft_phone_fixes
-           WHERE net = ANY($1::text[]) AND at > now() - make_interval(mins => $2)
-             AND accuracy <= $3
-           ORDER BY accuracy, at DESC LIMIT 1""",
-        keys, minutes, float(settings.get("phone_max_accuracy") or 100))
-    if not row:
-        return None
-    return Fix(row["lat"], row["lon"], max(row["accuracy"], 5.0), "phone-gps",
-               f"по телефону {row['device']}"[:60], True)
-
-
 async def resolve(http, cfg, conn, settings: dict, dev, wifi, ip: str, ext_ip: str = "",
                   ext_geo=None) -> tuple[Fix | None, str]:
     """Место компьютера и подпись Wi-Fi для следующего раза.
 
     ip — адрес, с которого агент пришёл на сервер (дома — внутренний), ext_ip — внешний адрес,
     который агент узнал сам, ext_geo — место по нему от той же службы.
-    Порядок: свежий GPS телефона из той же сети → известный адрес → Wi-Fi → место по IP.
+    Порядок: известный адрес → Wi-Fi → место по IP.
     """
     sig = wifi_signature(wifi)
     ext_ip = public_ip(ext_ip)
-    fix = await phone_fix(conn, settings, [ext_ip, ip])
-    if fix:
-        return fix, sig
     for addr in (ip, ext_ip):
         known = match_known(settings.get("ip_locations", []), addr) if addr else None
         if known:

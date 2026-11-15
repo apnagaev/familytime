@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 
@@ -79,6 +80,8 @@ class Engine:
         self.last_current: dict = {}
         self.block_sent: dict[str, float] = {}
         self.block_toast = -1e9
+        self.update_tries: dict[str, float] = {}     # версия → когда пробовали обновиться
+        self.update_thread = None
         self.lists_path = os.path.join(os.path.dirname(store.path) or ".", "lists.json")
         self.lists: dict = self._load_lists()
         self._rules_cache: dict[str, tuple] = {}
@@ -512,7 +515,7 @@ class Engine:
             "session": sess.state if sess else "none", "user": sess.user if sess else "",
             "current": self.last_current if sess else None,
             "samples": [{k: v for k, v in s.items() if k != "free"} for s in batch["samples"]],
-            "caps": ["lists", "userlists"],
+            "caps": ["lists", "userlists", "update"],
         }
         t0 = self.clock()
         try:
@@ -539,7 +542,37 @@ class Engine:
         self.st.policy_wall = t1
         self.save()
         self.sync_lists()
+        self.maybe_update(r.get("update"), t1)
         return True
+
+    UPDATE_RETRY = 6 * 3600
+
+    def maybe_update(self, upd: dict | None, wall: float) -> None:
+        """Сервер предложил новую версию: скачать, проверить и переустановиться (в фоне).
+        Неудачная попытка повторяется не раньше чем через 6 часов."""
+        if not upd or not hasattr(self.p, "self_update"):
+            return
+        ver = str(upd.get("version") or "")
+        sha = str(upd.get("sha256") or "")
+        if not ver or ver == VERSION or not sha:
+            return
+        if wall - self.update_tries.get(ver, -1e18) < self.UPDATE_RETRY:
+            return
+        if self.update_thread is not None and self.update_thread.is_alive():
+            return
+        self.update_tries[ver] = wall
+        url = self.cfg["server_url"].rstrip("/") + str(upd.get("url") or "/agent/package.zip")
+
+        def run():
+            try:
+                log.info("обновление до %s: скачиваю %s", ver, url)
+                self.p.self_update(url, sha, ver)
+                log.info("обновление до %s запущено — служба перезапустится", ver)
+            except Exception as e:  # noqa: BLE001
+                log.warning("обновление до %s не удалось: %s", ver, e)
+
+        self.update_thread = threading.Thread(target=run, name="update", daemon=True)
+        self.update_thread.start()
 
     def external_ip(self, wall: float) -> dict:
         """Внешний адрес компьютера и место по нему — у службы вроде ip-api.com, напрямую

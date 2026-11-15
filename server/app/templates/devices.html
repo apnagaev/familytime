@@ -17,6 +17,8 @@
     {% else %}Ещё не выходил на связь{% endif %}<br>
     {% if d.last_fix_at %}Место: <a href="https://yandex.ru/maps/?pt={{ d.last_lon }},{{ d.last_lat }}&z=16&l=map" target="_blank" rel="noopener">{{ '%.5f'|format(d.last_lat) }}, {{ '%.5f'|format(d.last_lon) }}</a> ±{{ d.last_accuracy|int }} м ({{ fmt((now - d.last_fix_at).total_seconds()) }} назад, {{ {'known-ip': 'известный адрес', 'yandex-wifi': 'Wi-Fi', 'yandex-ip': 'по IP', 'geoip': 'по IP, город'}.get(d.last_fix_source, d.last_fix_source) }}{% if d.last_place %}: {{ d.last_place }}{% endif %}){% if cfg.traccar_web_url %} · <a href="{{ cfg.traccar_web_url }}" target="_blank" rel="noopener">Traccar</a>{% endif %}<br>{% endif %}
     <span class="muted">Агент {{ d.agent_version or '?' }} · {{ d.os_version or '' }} · IP {{ d.last_ip or '' }}</span>
+    {% if agent_meta and d.agent_version and vtuple(d.agent_version) < vtuple(agent_meta.version) %}<br><span class="pill warn">есть {{ agent_meta.version }}</span>
+      <span class="small muted">{% if vtuple(d.agent_version) >= (1, 4) %}обновится сам в течение нескольких минут{% else %}эта версия не обновляется сама: один раз запустите на компьютере установщик (ниже){% endif %}</span>{% endif %}
   </div>
   <form method="post" action="/devices/{{ d.id }}" style="margin-top: 10px">
     <input type="hidden" name="csrf" value="{{ user.csrf }}">
@@ -29,8 +31,9 @@
       <select name="family_id"><option value="">без семьи</option>{% for f in families %}<option value="{{ f.id }}" {{ 'selected' if f.id == d.family_id }}>{{ f.name }}</option>{% endfor %}</select>
       {% endif %}
       <label><input type="checkbox" name="lost" value="1" {{ 'checked' if d.lost }}> потерян</label>
-      <label><input type="checkbox" name="lost_lock" value="1" {{ 'checked' if d.lost_lock }}> блокировать вход</label>
+      <label title="Действует только вместе с «потерян»"><input type="checkbox" name="lost_lock" value="1" {{ 'checked' if d.lost_lock }}> и блокировать вход</label>
     </div>
+    {% if d.lost_lock and not d.lost %}<p class="hint">Блокировка входа включится, только когда отмечено «потерян». Чтобы ребёнок не пользовался компьютером в определённые часы, задайте «Блокировка с / до» в правилах на его странице.</p>{% endif %}
     <label class="block small">Сообщение на экране, если потерян (пусто — из настроек)</label>
     <textarea name="lost_message" style="min-height: 50px">{{ d.lost_message }}</textarea>
     <div class="row"><button>Сохранить</button></div>
@@ -42,5 +45,40 @@
 {% else %}
 <div class="card muted">Компьютеров пока нет. {% if user.admin %}Установите агент — компьютер появится здесь после первого выхода на связь.{% else %}Компьютер появится здесь, когда на нём с установленным агентом войдёт ваш ребёнок или администратор привяжет его к вашей семье.{% endif %}</div>
 {% endfor %}
+<div class="card" id="install">
+  <h2>Установить на компьютер вне домена</h2>
+  {% if not agent_meta %}
+  <p class="muted">Администратор ещё не загрузил программу в общих настройках.</p>
+  {% else %}
+  <ol class="steps">
+    <li>Нажмите «Скачать установщик» и перенесите файл <b>FamilyTime-setup.cmd</b> на нужный компьютер (почтой, в мессенджере, на флешке) — или скачайте его прямо там. Если браузер предупредит, что файл может быть опасен, выберите «Сохранить».</li>
+    <li>Войдите в Windows под <b>учётной записью администратора</b> и дважды щёлкните файл. На вопрос «Разрешить этому приложению вносить изменения?» ответьте «Да».</li>
+    <li>Если Windows покажет «Система Windows защитила ваш компьютер», нажмите «Подробнее» → «Выполнить в любом случае».</li>
+    <li>Дождитесь надписи «Готово» и закройте окно. Через минуту компьютер появится в этом списке.</li>
+  </ol>
+  <form method="post" action="/devices/installer" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    {% if install_families|length > 1 %}<select name="family_id">{% for f in install_families %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}</select>{% elif install_families %}<input type="hidden" name="family_id" value="{{ install_families[0].id }}">{% endif %}
+    <select name="mode">
+      <option value="control">компьютер ребёнка: время и локация</option>
+      <option value="track">взрослый компьютер: только локация</option>
+    </select>
+    <button>Скачать установщик</button>
+  </form>
+  <p class="hint">Версия {{ agent_meta.version }}. В файле — код установки на {{ 7 }} дней: им можно поставить программу на несколько компьютеров, и они сразу попадут {% if install_families|length > 1 %}в выбранную семью{% else %}в вашу семью{% endif %}. Ребёнок должен входить в Windows под <b>обычной</b> учётной записью, не администратором, — иначе сможет удалить программу. Обновления приходят сами; тот же файл, запущенный ещё раз, просто обновит программу, ничего не меняя.</p>
+  {% if codes %}
+  <table class="small">
+    <tr><th>Код от</th><th>Для</th>{% if install_families|length > 1 or user.admin %}<th>Семья</th>{% endif %}<th class="num">Установок</th><th>Действует до</th><th></th></tr>
+    {% for k in codes %}
+    <tr><td>{{ k.created_at.astimezone(cfg.tz).strftime('%d.%m %H:%M') }} · {{ k.created_by }}</td>
+      <td>{{ 'ребёнка' if k.mode == 'control' else 'взрослого' }}</td>
+      {% if install_families|length > 1 or user.admin %}<td>{{ k.family_name or '—' }}</td>{% endif %}
+      <td class="num">{{ k.uses }}</td><td>{{ k.expires_at.astimezone(cfg.tz).strftime('%d.%m') }}</td>
+      <td><form method="post" action="/devices/codes/{{ k.id }}/revoke" class="inline"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="ghost small">Отозвать</button></form></td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% endif %}
+</div>
 <p class="hint">«Потерян»: локация отправляется чаще, на экране висит сообщение. «Блокировать вход» дополнительно сразу завершает любой сеанс на этом компьютере.</p>
 {% endblock %}

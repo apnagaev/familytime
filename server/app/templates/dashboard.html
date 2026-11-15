@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% import "_macros.html" as m %}
+{% import "_macros.html" as m with context %}
 {% block content %}
 <div class="spread"><h1>Дети</h1>{% if pending %}<a class="btn" href="/requests">Запросы времени: {{ pending }}</a>{% endif %}</div>
 <div class="grid">
@@ -32,6 +32,7 @@
       </form>
       {% endif %}
     </div>
+    <div class="row" style="margin-top: 8px">{{ m.lock_form(v.child, v.st, '/dashboard') }}</div>
   </div>
 {% endfor %}
 </div>

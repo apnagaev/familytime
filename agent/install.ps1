@@ -8,6 +8,10 @@
   powershell -ExecutionPolicy Bypass -File \\server\familytime$\install.ps1
 
 .EXAMPLE
+  # самообновление агента: настройки берутся из %ProgramData%\FamilyTime\config.json
+  .\install.ps1 -Source C:\ProgramData\FamilyTime\update\1.4.1
+
+.EXAMPLE
   .\install.ps1 -ServerUrl https://kids.example.com -EnrollSecret ... -Mode track
 #>
 param(
@@ -31,6 +35,12 @@ try {
     $jsonPath = Join-Path $Source "familytime.json"
     if (Test-Path $jsonPath) {
         (Get-Content $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties |
+            ForEach-Object { $cfg[$_.Name] = $_.Value }
+    }
+    # без параметров и familytime.json (самообновление) — настройки уже установленного агента
+    $oldCfg = Join-Path (Join-Path $env:ProgramData $Name) "config.json"
+    if (-not $cfg.server_url -and -not $ServerUrl -and (Test-Path $oldCfg)) {
+        (Get-Content $oldCfg -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties |
             ForEach-Object { $cfg[$_.Name] = $_.Value }
     }
     if ($ServerUrl) { $cfg.server_url = $ServerUrl }
@@ -62,6 +72,16 @@ try {
         if ($svc.Status -ne "Running") { Start-Service $Name }
         exit 0
     }
+    # более старую версию поверх новой не ставим (старая папка GPO после самообновления)
+    $older = $false
+    try { $older = $curVer -and ([version]$newVer -lt [version]$curVer) } catch { }
+    $keepFiles = -not $Force -and $svc -and $older
+    if ($keepFiles -and -not $cfgChanged) {
+        Log "пропуск: установлена $curVer, источник $newVer старше"
+        if ($svc.Status -ne "Running") { Start-Service $Name }
+        exit 0
+    }
+    if ($keepFiles) { Log "файлы $curVer оставляю (источник $newVer старше), меняю только настройки" }
     Log "установка $newVer (было: '$curVer'), запуск от $([Security.Principal.WindowsIdentity]::GetCurrent().Name), источник $Source"
 
     if ($svc) {
@@ -71,12 +91,14 @@ try {
     Get-Process familytime-helper -ErrorAction SilentlyContinue | Stop-Process -Force
 
     # ---- файлы
-    $srcMb = [int]((Get-ChildItem (Join-Path $Source $Name) -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
-    Log "копирование файлов: $srcMb МБ"
-    & robocopy (Join-Path $Source $Name) $Dest /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "robocopy: код $LASTEXITCODE" }
-    Log "файлы скопированы (robocopy $LASTEXITCODE)"
-    Set-Content "$Dest\version.txt" $newVer -Encoding ascii
+    if (-not $keepFiles) {
+        $srcMb = [int]((Get-ChildItem (Join-Path $Source $Name) -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+        Log "копирование файлов: $srcMb МБ"
+        & robocopy (Join-Path $Source $Name) $Dest /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "robocopy: код $LASTEXITCODE" }
+        Log "файлы скопированы (robocopy $LASTEXITCODE)"
+        Set-Content "$Dest\version.txt" $newVer -Encoding ascii
+    }
     # прежний токен выдан для другого сервера или секрета — регистрация заново
     if ($cfgChanged) { Remove-Item (Join-Path $Data "state.json") -Force -ErrorAction SilentlyContinue }
     [IO.File]::WriteAllText($cfgPath, $cfgJson, (New-Object Text.UTF8Encoding $false))
