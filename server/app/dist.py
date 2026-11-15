@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from . import auth
 from .portal import back, list_scope, need_admin, need_parent
@@ -154,7 +154,8 @@ async def agent_latest(request: Request, code: str = ""):
         out["code_ok"] = bool(row)
         if row:
             out.update(family=row["family_name"] or "", mode=row["mode"])
-    return out
+    # charset явно: PowerShell 5.1 без него читает ответ как Latin-1
+    return JSONResponse(out, media_type="application/json; charset=utf-8")
 
 
 @router.get("/agent/package.zip")
