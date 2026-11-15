@@ -31,6 +31,7 @@ user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWOR
 user32.GetUserObjectInformationW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
                                              wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
 user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+user32.LockWorkStation.argtypes = []
 kernel32.GetTickCount.restype = wintypes.DWORD
 dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 

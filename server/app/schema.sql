@@ -155,3 +155,32 @@ ALTER TABLE ft_lists ADD COLUMN IF NOT EXISTS username text REFERENCES ft_childr
 ALTER TABLE ft_lists DROP CONSTRAINT IF EXISTS ft_lists_category_url_key;
 CREATE UNIQUE INDEX IF NOT EXISTS ft_lists_child_url ON ft_lists (username, category, url);
 ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS family_id bigint REFERENCES ft_families ON DELETE SET NULL;
+
+-- место по IP и повторное использование места по Wi-Fi (1.2.1)
+CREATE TABLE IF NOT EXISTS ft_geoip (
+    ip         text PRIMARY KEY,
+    lat        double precision NOT NULL,
+    lon        double precision NOT NULL,
+    accuracy   double precision NOT NULL,
+    source     text NOT NULL,
+    place      text NOT NULL DEFAULT '',
+    fetched_at timestamptz NOT NULL
+);
+ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS last_wifi_sig text NOT NULL DEFAULT '';
+ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS last_place text NOT NULL DEFAULT '';
+
+-- 1.3: блокировка по времени, тип семьи, точки телефонов (Traccar Client) по адресам
+ALTER TABLE ft_rules ADD COLUMN IF NOT EXISTS block_from time;
+ALTER TABLE ft_rules ADD COLUMN IF NOT EXISTS block_to time;
+ALTER TABLE ft_families ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'family';
+CREATE TABLE IF NOT EXISTS ft_phone_fixes (
+    id       bigserial PRIMARY KEY,
+    net      text NOT NULL,              -- публичный IP или /24 внутренней сети телефона
+    device   text NOT NULL,
+    lat      double precision NOT NULL,
+    lon      double precision NOT NULL,
+    accuracy double precision NOT NULL,
+    at       timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ft_phone_fixes_net ON ft_phone_fixes (net, at);
+ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS ext_ip text NOT NULL DEFAULT '';

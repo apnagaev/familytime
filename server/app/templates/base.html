@@ -9,6 +9,9 @@
 <body>
 <header class="top">
   <a class="brand" href="/">⏱ Время за компьютером</a>
+  {% if user and user.admin %}
+  <span class="tabs" role="tablist">{% for k, label in kind_labels.items() %}<a role="tab" href="/kind/{{ k }}?back_to={{ request.url.path if not request.url.path.startswith('/child/') else '/dashboard' }}" class="{{ 'on' if k == kind }}" aria-selected="{{ 'true' if k == kind else 'false' }}">{{ label }}</a>{% endfor %}</span>
+  {% endif %}
   {% if user %}
   <nav>
     {% if user.parent %}

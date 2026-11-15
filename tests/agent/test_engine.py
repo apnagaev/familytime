@@ -35,6 +35,10 @@ class FakePlatform:
                                    {"pid": 52, "exe": "explorer.exe"}]}
         self.procs = [(60, "Steam.exe"), (61, "firefox.exe"), (62, "svchost.exe")]
         self.killed, self.logoffs, self.launched = [], [], []
+        self.locks, self.notices = [], []
+        self.ext = {"status": "success", "query": "95.31.1.20", "lat": 55.7, "lon": 37.6,
+                    "city": "Москва"}
+        self.ext_calls = 0
         self.policy_calls = []
         self.blocked_calls = []
         self.cleared = []
@@ -50,6 +54,14 @@ class FakePlatform:
     def session_processes(self, sid): return self.procs
     def kill(self, pid): self.killed.append(pid)
     def logoff(self, sid): self.logoffs.append(sid)
+    def lock_session(self, sid): self.locks.append(sid)
+    def set_logon_notice(self, caption, text): self.notices.append(text)
+
+    def http_json(self, url):
+        self.ext_calls += 1
+        if self.ext is None:
+            raise OSError("offline")
+        return self.ext
     def clear_browser_policy(self, sid, user, domain): self.cleared.append(user)
     def set_browser_policy(self, sid, user, domain, allowed, blocked=None):
         self.policy_calls.append(allowed)
@@ -197,12 +209,75 @@ def test_window_outside_hours(tmp_path):
     assert plat.directive["mode"] == "restricted" and plat.directive["reason"] == "window"
 
 
-def test_lost_lock_logs_off(tmp_path):
+def test_lost_lock_locks_session_and_logon_notice(tmp_path):
     eng, clk, plat, cli = make(tmp_path)
     eng.step()
+    assert plat.notices == [None]                      # при запуске — снять своё, если осталось
     eng.st.device = {**DEVICE, "lost": {"on": True, "lock": True, "message": "Верните"}}
     run(eng, clk, 5)
-    assert plat.logoffs == [1] and plat.directive["lost"]["message"] == "Верните"
+    d = plat.directive
+    assert d["lock"] is True and d["lost"]["message"] == "Верните"   # Win+L — сразу, помощником
+    assert plat.notices[-1] == "Верните" and not plat.locks
+    run(eng, clk, 5)                                   # помощник не справился — служба
+    assert plat.locks == [1] and not plat.logoffs
+    plat.session.locked = True
+    n = len(plat.locks)
+    run(eng, clk, 20)
+    assert len(plat.locks) == n                        # заблокирован — не трогаем
+    plat.session.locked = False                        # снова вошли — снова блокируем
+    run(eng, clk, 10)
+    assert len(plat.locks) > n
+    eng.st.device = {**DEVICE, "lost": {"on": False, "lock": False, "message": ""}}
+    run(eng, clk, 5)
+    assert plat.notices[-1] is None and not plat.directive.get("lock")
+
+
+def test_block_time_locks_child(tmp_path):
+    eng, clk, plat, cli = make(tmp_path)
+    rules_ = {str(i): {"limit": 600, "from": None, "to": None,
+                       "block_from": "22:30", "block_to": "07:00"} for i in range(7)}
+    orig = cli.post
+
+    def post(path, body, token=""):
+        r = orig(path, body, token)
+        if path.endswith("/heartbeat"):
+            for u in r["users"]:
+                r["users"][u] = {**policy(0, 36000, rules_),
+                                 "messages": {"block": "Спать пора, до 07:00"}}
+        return r
+    cli.post = post
+    clk.t = DAY0 + 10 * 3600 + 45 * 60                 # 22:45 МСК
+    eng.step()
+    run(eng, clk, 5)
+    d = plat.directive
+    assert d["mode"] == "blocked" and d["lock"] and d["block"]["message"] == "Спать пора, до 07:00"
+    assert plat.policy_calls[-1] is not None           # браузеры — в «только учёба»
+    run(eng, clk, 10)
+    assert plat.locks                                  # не заблокировал сам — блокирует служба
+    # без связи правило всё равно действует: оно пришло вместе с политикой
+    cli.fail = True
+    clk.t += 3600                                      # 23:45
+    run(eng, clk, 5)
+    assert plat.directive["mode"] == "blocked"
+    clk.t += 8 * 3600                                  # 07:45
+    run(eng, clk, 5)
+    assert plat.directive["mode"] == "normal" and not plat.directive.get("lock")
+
+
+def test_external_ip_sent_with_location(tmp_path):
+    eng, clk, plat, cli = make(tmp_path)
+    eng.st.device = {**DEVICE, "ext_ip_url": "http://ip-api.example/json/"}
+    eng.st.token = "tok"
+    eng.location(plat.session, plat.report, clk.t)
+    body = [b for p, b in cli.calls if p.endswith("/location")][-1]
+    assert body["ext_ip"] == "95.31.1.20"
+    assert body["ext_geo"] == {"lat": 55.7, "lon": 37.6, "city": "Москва"}
+    assert "local_ip" not in body
+    eng.location(plat.session, plat.report, clk.t + 60)
+    assert plat.ext_calls == 1                         # не чаще раза в 5 минут
+    plat.ext = None                                    # служба недоступна — последний известный
+    eng.location(plat.session, plat.report, clk.t + 400)
+    assert [b for p, b in cli.calls if p.endswith("/location")][-1]["ext_ip"] == "95.31.1.20"
 
 
 def test_helper_missing_in_restricted_logs_off(tmp_path):

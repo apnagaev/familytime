@@ -95,8 +95,16 @@ class WifiAP(BaseModel):
     rssi: int                               # дБм
 
 
+class ExtGeo(BaseModel):
+    lat: float | None = None
+    lon: float | None = None
+    city: str = ""
+
+
 class LocationIn(BaseModel):
     wifi: list[WifiAP] = Field(default_factory=list, max_length=100)
+    ext_ip: str = ""                        # внешний адрес, который агент узнал сам (ip-api.com)
+    ext_geo: ExtGeo | None = None           # место по этому адресу от той же службы
     ssid: str = ""
     battery: int | None = None
     on_ac: bool | None = None
@@ -121,7 +129,8 @@ OLD_AGENT_LIMIT = 5000      # агентам 1.0.x списки идут в ка
 def restricted_domains(cfg, eff: dict) -> list[str]:
     """Открытые в режиме «только учёба»: протоколы (telemost:*), портал и Keycloak, учебные."""
     out: list[str] = [f"{sch}:*" for sch in eff.get("edu_schemes", [])]
-    for extra in [_host(cfg.public_url), _host(cfg.oidc_issuer), *cfg.extra_allowed_domains]:
+    for extra in [_host(cfg.public_url), *cfg.company_hosts, _host(cfg.oidc_issuer),
+                  *cfg.extra_allowed_domains]:
         extra = policy.norm_domain(extra)
         if extra and extra not in out:
             out.append(extra)
@@ -140,7 +149,8 @@ def lists_payload(cfg, eff: dict, limit: int | None = None) -> dict:
     }
 
 
-def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_set: dict | None = None) -> dict:
+def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_set: dict | None = None,
+                  kind: str = "family") -> dict:
     """Политика компьютера. Агент 1.2 (caps userlists) берёт списки, простой и предупреждения
     из политики ребёнка; агентам 1.1 и 1.0 отдаётся один набор на компьютер — объединение
     по детям его семьи (union)."""
@@ -159,7 +169,8 @@ def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_s
         "idle_minutes": int(cs["idle_minutes"]),
         "warn_minutes": [int(x) for x in cs["warn_minutes"]],
         "location_interval": max(60, int(interval) * 60),
-        "portal_url": cfg.public_url,
+        "portal_url": cfg.company_url if kind == "company" else cfg.public_url,
+        "ext_ip_url": cfg.ext_ip_url,
         "lost": {
             "on": dev["lost"],
             "lock": dev["lost_lock"],
@@ -179,9 +190,13 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
         "used": policy.fmt_minutes(st["counted_seconds"]),
         "from": policy.fmt_time(rule.window_from),
         "to": policy.fmt_time(rule.window_to),
+        "block_from": policy.fmt_time(rule.block_from),
+        "block_to": policy.fmt_time(rule.block_to),
     }
-    fam = await conn.fetchval("SELECT messages FROM ft_families WHERE id = $1", child["family_id"])
-    msgs = policy.family_messages(fam)
+    fam = await conn.fetchrow("SELECT messages, kind FROM ft_families WHERE id = $1",
+                              child["family_id"])
+    msgs = policy.family_messages(fam["messages"] if fam else None,
+                                  fam["kind"] if fam else "family")
     cs = policy.child_settings(child["settings"])
     eff = await lists.effective(conn, child)
     return {
@@ -194,7 +209,8 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
         "counted_seconds": st["counted_seconds"],
         "remaining_seconds": st["remaining_seconds"],
         "window_change_in": st["window_change_in"],
-        "messages": {k: policy.render(msgs.get(k, ""), values) for k in ("warn", "limit", "window")},
+        "messages": {k: policy.render(msgs.get(k, ""), values)
+                     for k in ("warn", "limit", "window", "block", "restricted")},
         "lists_version": eff["version"],
         "restricted_kill": cs["restricted_kill"],
         "idle_minutes": int(cs["idle_minutes"]),
@@ -205,6 +221,8 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
                 "limit": r.limit_minutes,
                 "from": policy.fmt_time(r.window_from) or None,
                 "to": policy.fmt_time(r.window_to) or None,
+                "block_from": policy.fmt_time(r.block_from) or None,
+                "block_to": policy.fmt_time(r.block_to) or None,
             } for wd, r in st["rules"].items()
         },
     }
@@ -339,12 +357,14 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
         union = None if "userlists" in body.caps \
             else await lists.effective_union(conn, dev["family_id"])
         child_set = policy.child_settings(kids[cur_child]["settings"]) if cur_child else None
+        kind = await conn.fetchval("SELECT kind FROM ft_families WHERE id = $1",
+                                   dev["family_id"]) or "family"
     return {
         "server_time": now.timestamp(),
         "utc_offset": int(now_local.utcoffset().total_seconds()),
         "accepted": accepted,
         "seq": body.seq,
-        "device": device_policy(cfg, dev, settings, union, body.caps, child_set),
+        "device": device_policy(cfg, dev, settings, union, body.caps, child_set, kind),
         "users": policies,
     }
 
@@ -373,18 +393,25 @@ async def agent_lists(request: Request, body: ListsIn | None = None, dev=Depends
 async def location(body: LocationIn, request: Request, dev=Depends(current_device)):
     cfg = request.app.state.cfg
     ip = client_ip(request)
-    fix = await locator.locate(request.app.state.http, cfg, body.wifi, ip)
     now = datetime.now(timezone.utc)
     async with request.app.state.pool.acquire() as conn:
         settings = await db.get_settings(conn)
+        fix, sig = await locator.resolve(request.app.state.http, cfg, conn, settings, dev,
+                                         body.wifi, ip, body.ext_ip, body.ext_geo)
+        ext_ip = locator.public_ip(body.ext_ip) or locator.public_ip(ip)
         if fix:
+            # повторно использованное место не продлевает свой срок: last_fix_at не трогаем
             await conn.execute(
                 """UPDATE ft_devices SET last_lat = $2, last_lon = $3, last_accuracy = $4,
-                   last_fix_at = $5, last_fix_source = $6, battery = $7, on_ac = $8 WHERE id = $1""",
-                dev["id"], fix.lat, fix.lon, fix.accuracy, now, fix.source, body.battery, body.on_ac)
+                   last_fix_at = CASE WHEN $11 THEN last_fix_at ELSE $5 END,
+                   last_fix_source = $6, battery = $7, on_ac = $8, last_wifi_sig = $9,
+                   last_place = $10, last_ip = $12, ext_ip = $13 WHERE id = $1""",
+                dev["id"], fix.lat, fix.lon, fix.accuracy, now, fix.source, body.battery,
+                body.on_ac, sig, fix.place, fix.cached and fix.source == "yandex-wifi", ip, ext_ip)
         else:
-            await conn.execute("UPDATE ft_devices SET battery = $2, on_ac = $3 WHERE id = $1",
-                               dev["id"], body.battery, body.on_ac)
+            await conn.execute(
+                "UPDATE ft_devices SET battery = $2, on_ac = $3, ext_ip = $4 WHERE id = $1",
+                dev["id"], body.battery, body.on_ac, ext_ip)
         sent = False
         if fix and cfg.traccar_osmand_url:
             if not dev["traccar_ok"]:
@@ -394,7 +421,8 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
                     await conn.execute("UPDATE ft_devices SET traccar_ok = true WHERE id = $1",
                                        dev["id"])
             sent = await locator.send_osmand(
-                request.app.state.http, cfg, dev, fix, body, ip, now)
+                request.app.state.http, cfg, dev, fix, body, ip, now,
+                spread=bool(settings.get("jitter", True)))
     loc = settings["location"]
     interval = loc["lost_interval_minutes"] if dev["lost"] else loc["interval_minutes"]
     return {
@@ -403,5 +431,6 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
         "lat": fix.lat if fix else None,
         "lon": fix.lon if fix else None,
         "accuracy": fix.accuracy if fix else None,
+        "source": fix.source if fix else None,
         "next_interval": max(60, int(interval) * 60),
     }

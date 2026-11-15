@@ -91,9 +91,10 @@ async def list_families(conn, ids: list[int] | None = None):
     return await conn.fetch(q + " ORDER BY f.name")
 
 
-async def create_family(conn, name: str, parent: str | None = None) -> int:
-    fid = await conn.fetchval("INSERT INTO ft_families (name) VALUES ($1) RETURNING id",
-                              name.strip()[:100] or "Семья")
+async def create_family(conn, name: str, parent: str | None = None, kind: str = "family") -> int:
+    fid = await conn.fetchval("INSERT INTO ft_families (name, kind) VALUES ($1, $2) RETURNING id",
+                              name.strip()[:100] or "Семья",
+                              kind if kind in policy.FAMILY_KINDS else "family")
     if parent:
         await conn.execute("INSERT INTO ft_family_parents VALUES ($1, $2) ON CONFLICT DO NOTHING",
                            fid, parent.lower())
@@ -139,16 +140,20 @@ async def windows_logins(conn) -> dict[str, str]:
 
 async def add_child(conn, username: str, display_name: str, family_id: int | None = None) -> None:
     username = username.strip().lower()
+    kind = (await conn.fetchval("SELECT kind FROM ft_families WHERE id = $1", family_id)
+            if family_id is not None else None) or "family"
+    rules = policy.COMPANY_RULES if kind == "company" else policy.DEFAULT_RULES
     async with conn.transaction():
         await conn.execute(
             """INSERT INTO ft_children (username, display_name, family_id, settings)
                VALUES ($1, $2, $3, $4)
                ON CONFLICT (username) DO UPDATE SET display_name = EXCLUDED.display_name,
                enabled = true, family_id = COALESCE(EXCLUDED.family_id, ft_children.family_id)""",
-            username, display_name.strip() or username, family_id, policy.child_settings({}))
-        for wd, (lim, a, b) in enumerate(policy.DEFAULT_RULES):
+            username, display_name.strip() or username, family_id, policy.child_defaults(kind))
+        for wd, (lim, a, b) in enumerate(rules):
             await conn.execute(
-                "INSERT INTO ft_rules VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                "INSERT INTO ft_rules (username, weekday, limit_minutes, window_from, window_to) "
+                "VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
                 username, wd, lim, a, b)
 
 
@@ -159,17 +164,21 @@ async def get_rules(conn, username: str) -> dict[int, policy.Rule]:
         lim, a, b = policy.DEFAULT_RULES[wd]
         out[wd] = policy.Rule(lim, a, b)
     for r in rows:
-        out[r["weekday"]] = policy.Rule(r["limit_minutes"], r["window_from"], r["window_to"])
+        out[r["weekday"]] = policy.Rule(r["limit_minutes"], r["window_from"], r["window_to"],
+                                        r["block_from"], r["block_to"])
     return out
 
 
 async def set_rule(conn, username: str, weekday: int, limit: int | None,
-                   a: time | None, b: time | None) -> None:
+                   a: time | None, b: time | None, block_a: time | None = None,
+                   block_b: time | None = None) -> None:
     await conn.execute(
-        """INSERT INTO ft_rules VALUES ($1, $2, $3, $4, $5)
+        """INSERT INTO ft_rules (username, weekday, limit_minutes, window_from, window_to,
+                                 block_from, block_to) VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT (username, weekday) DO UPDATE SET limit_minutes = EXCLUDED.limit_minutes,
-           window_from = EXCLUDED.window_from, window_to = EXCLUDED.window_to""",
-        username, weekday, limit, a, b)
+           window_from = EXCLUDED.window_from, window_to = EXCLUDED.window_to,
+           block_from = EXCLUDED.block_from, block_to = EXCLUDED.block_to""",
+        username, weekday, limit, a, b, block_a, block_b)
 
 
 async def bonus_minutes(conn, username: str, day: date) -> int:

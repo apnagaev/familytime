@@ -77,6 +77,10 @@ class OIDC:
         raise HTTPException(401, "unknown signing key")
 
 
+def base(request: Request) -> str:
+    return request.app.state.cfg.base_url(request.headers.get("host"))
+
+
 def _serializer(cfg, salt: str) -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(cfg.session_secret, salt=salt)
 
@@ -123,7 +127,8 @@ def check_csrf(request: Request, user: User, token: str) -> None:
     origin = (request.headers.get("origin") or "").strip()
     if not origin or origin == "null" or not cfg.public_url:
         return
-    allowed = {_host(cfg.public_url), (request.headers.get("host") or "").split(":")[0].lower()}
+    allowed = {_host(cfg.public_url), *cfg.company_hosts,
+               (request.headers.get("host") or "").split(":")[0].lower()}
     if _host(origin) not in allowed:
         log.warning("CSRF: чужой Origin %r (PUBLIC_URL %s), %s", origin, cfg.public_url,
                     request.url.path)
@@ -146,7 +151,7 @@ async def login_redirect(request: Request, next_url: str = "/") -> RedirectRespo
     params = {
         "response_type": "code",
         "client_id": cfg.oidc_client_id,
-        "redirect_uri": cfg.public_url + "/oidc/callback",
+        "redirect_uri": base(request) + "/oidc/callback",
         "scope": "openid profile",
         "state": state,
         "nonce": nonce,
@@ -173,7 +178,7 @@ async def callback(request: Request, code: str, state: str) -> RedirectResponse:
     data = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": cfg.public_url + "/oidc/callback",
+        "redirect_uri": base(request) + "/oidc/callback",
         "client_id": cfg.oidc_client_id,
         "code_verifier": flow["v"],
     }
@@ -209,13 +214,13 @@ async def callback(request: Request, code: str, state: str) -> RedirectResponse:
 
 async def logout_redirect(request: Request) -> RedirectResponse:
     cfg = request.app.state.cfg
-    target = cfg.public_url + "/"
+    target = base(request) + "/"
     if not cfg.dev_login:
         try:
             m = await request.app.state.oidc.meta()
             if m.get("end_session_endpoint"):
                 target = m["end_session_endpoint"] + "?" + urlencode(
-                    {"client_id": cfg.oidc_client_id, "post_logout_redirect_uri": cfg.public_url + "/"})
+                    {"client_id": cfg.oidc_client_id, "post_logout_redirect_uri": base(request) + "/"})
         except (httpx.HTTPError, HTTPException):
             pass
     resp = RedirectResponse(target, 302)

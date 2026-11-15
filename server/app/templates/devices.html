@@ -15,7 +15,7 @@
       {% if d.last_user %} · {{ d.last_user }}{% if d.last_session == 'locked' %} (заблокирован){% endif %}{% endif %}
       {% if d.battery is not none %} · 🔋 {{ d.battery }}%{% if d.on_ac %} ⚡{% endif %}{% endif %}
     {% else %}Ещё не выходил на связь{% endif %}<br>
-    {% if d.last_fix_at %}Место: <a href="https://yandex.ru/maps/?pt={{ d.last_lon }},{{ d.last_lat }}&z=16&l=map" target="_blank" rel="noopener">{{ '%.5f'|format(d.last_lat) }}, {{ '%.5f'|format(d.last_lon) }}</a> ±{{ d.last_accuracy|int }} м ({{ fmt((now - d.last_fix_at).total_seconds()) }} назад, {{ d.last_fix_source }}){% if cfg.traccar_web_url %} · <a href="{{ cfg.traccar_web_url }}" target="_blank" rel="noopener">Traccar</a>{% endif %}<br>{% endif %}
+    {% if d.last_fix_at %}Место: <a href="https://yandex.ru/maps/?pt={{ d.last_lon }},{{ d.last_lat }}&z=16&l=map" target="_blank" rel="noopener">{{ '%.5f'|format(d.last_lat) }}, {{ '%.5f'|format(d.last_lon) }}</a> ±{{ d.last_accuracy|int }} м ({{ fmt((now - d.last_fix_at).total_seconds()) }} назад, {{ {'known-ip': 'известный адрес', 'yandex-wifi': 'Wi-Fi', 'yandex-ip': 'по IP', 'geoip': 'по IP, город'}.get(d.last_fix_source, d.last_fix_source) }}{% if d.last_place %}: {{ d.last_place }}{% endif %}){% if cfg.traccar_web_url %} · <a href="{{ cfg.traccar_web_url }}" target="_blank" rel="noopener">Traccar</a>{% endif %}<br>{% endif %}
     <span class="muted">Агент {{ d.agent_version or '?' }} · {{ d.os_version or '' }} · IP {{ d.last_ip or '' }}</span>
   </div>
   <form method="post" action="/devices/{{ d.id }}" style="margin-top: 10px">

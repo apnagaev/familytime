@@ -47,9 +47,17 @@ DEFAULT_SETTINGS: dict = {
                  "Попросить ещё время можно на портале.",
         "window": "{name}, сейчас компьютер работает только для учёбы. "
                   "Свободное время — с {from} до {to}.",
+        "block": "{name}, сейчас компьютером пользоваться нельзя (до {block_to}).",
+        "restricted": "Сейчас работают только учебные программы и сайты.",
         "lost": "Этот компьютер потерян. Если вы его нашли, пожалуйста, свяжитесь с владельцем.",
     },
     "location": {"interval_minutes": 15, "lost_interval_minutes": 2},
+    # известные адреса: [{"net": "203.0.113.5/32", "lat": .., "lon": .., "accuracy": 50, "name": "Дом"}]
+    "ip_locations": [],
+    "jitter": True,               # разброс точек в Traccar в пределах точности
+    "phone_ids": [],              # Traccar Client, чьим точкам можно уточнять место по сети
+    "phone_minutes": 30,          # насколько свежей должна быть точка телефона
+    "phone_max_accuracy": 100,    # м: менее точные точки телефона не используются
 }
 
 # что настраивается у каждого ребёнка (копируется между детьми вместе с подписками)
@@ -58,7 +66,19 @@ CHILD_LIST_KEYS = {
     "blocked_apps": "exe", "edu_schemes": "scheme", "restricted_kill": "exe",
 }
 CHILD_KEYS = (*CHILD_LIST_KEYS, "idle_minutes", "warn_minutes")
-FAMILY_MESSAGE_KEYS = ("warn", "limit", "window")
+FAMILY_MESSAGE_KEYS = ("warn", "limit", "window", "block", "restricted")
+FAMILY_KINDS = ("family", "company")
+
+# тексты по умолчанию для компании (сотрудники вместо детей, работа вместо учёбы)
+COMPANY_MESSAGES = {
+    "warn": "{name}, личного времени за компьютером осталось {left}.",
+    "limit": "{name}, личное время за компьютером на сегодня закончилось ({limit}). "
+             "Рабочие сайты и программы продолжают работать.",
+    "window": "{name}, сейчас компьютер работает только для работы. "
+              "Личное время — с {from} до {to}.",
+    "block": "{name}, сейчас компьютером пользоваться нельзя (до {block_to}).",
+    "restricted": "Сейчас работают только рабочие программы и сайты.",
+}
 
 
 def child_settings(stored: dict | None) -> dict:
@@ -70,10 +90,34 @@ def child_settings(stored: dict | None) -> dict:
     return out
 
 
-def family_messages(stored: dict | None) -> dict:
-    out = {k: DEFAULT_SETTINGS["messages"][k] for k in FAMILY_MESSAGE_KEYS}
+def family_messages(stored: dict | None, kind: str = "family") -> dict:
+    base = COMPANY_MESSAGES if kind == "company" else DEFAULT_SETTINGS["messages"]
+    out = {k: base[k] for k in FAMILY_MESSAGE_KEYS}
     out.update({k: v for k, v in (stored or {}).items() if k in out and v})
     return out
+
+
+# новый сотрудник компании: рабочие программы вместо учебных, без учебных сайтов,
+# мессенджеры не закрываются (они рабочие)
+COMPANY_CHILD_DEFAULTS = {
+    "edu_apps": [
+        "winword.exe", "excel.exe", "powerpnt.exe", "onenote.exe", "outlook.exe", "olk.exe",
+        "ms-teams.exe", "teams.exe", "msteams.exe", "notepad.exe", "acrord32.exe", "acrobat.exe",
+        "1cv8.exe", "1cv8c.exe", "code.exe", "calc.exe", "calculatorapp.exe", "mspaint.exe",
+        "snippingtool.exe", "mstsc.exe", "zoom.exe", "telemost.exe", "yandexmessenger.exe",
+    ],
+    "edu_domains": [],
+    "restricted_kill": ["steam.exe", "epicgameslauncher.exe", "discord.exe"],
+}
+# личное время 60 минут в день, без ограничений по часам
+COMPANY_RULES = [(60, None, None)] * 7
+
+
+def child_defaults(kind: str) -> dict:
+    st = child_settings({})
+    if kind == "company":
+        st.update(copy.deepcopy(COMPANY_CHILD_DEFAULTS))
+    return st
 
 
 DEFAULT_RULES = [
@@ -184,19 +228,28 @@ def is_free(exe: str, domain: str, settings: dict) -> bool:
 @dataclass
 class Rule:
     limit_minutes: int | None        # None — без лимита
-    window_from: time | None
+    window_from: time | None         # свободное время: вне его — «только учёба»
     window_to: time | None
+    block_from: time | None = None   # блокировка: компьютер нельзя использовать совсем
+    block_to: time | None = None
+
+
+def _between(a: time | None, b: time | None, t: time) -> bool | None:
+    """t в [a, b); через полночь, если b < a. None — интервал не задан."""
+    if a is None or b is None or a == b:
+        return None
+    if a < b:
+        return a <= t < b
+    return t >= a or t < b
 
 
 def in_window(rule: Rule, t: time) -> bool:
-    if rule.window_from is None or rule.window_to is None:
-        return True
-    a, b = rule.window_from, rule.window_to
-    if a == b:
-        return True
-    if a < b:
-        return a <= t < b
-    return t >= a or t < b           # через полночь
+    r = _between(rule.window_from, rule.window_to, t)
+    return True if r is None else r
+
+
+def in_block(rule: Rule, t: time) -> bool:
+    return bool(_between(rule.block_from, rule.block_to, t))
 
 
 def seconds_to_window_change(rule: Rule, now: datetime) -> int | None:
@@ -229,7 +282,9 @@ def compute_status(rule: Rule, bonus_minutes: int, counted_seconds: int, now_loc
     limit_s = None if rule.limit_minutes is None else max(0, (rule.limit_minutes + bonus_minutes) * 60)
     remaining = None if limit_s is None else max(0, limit_s - counted_seconds)
     window_ok = in_window(rule, now_local.time())
-    if not window_ok:
+    if in_block(rule, now_local.time()):
+        mode, reason = "blocked", "block"
+    elif not window_ok:
         mode, reason = "restricted", "window"
     elif remaining is not None and remaining <= 0:
         mode, reason = "restricted", "limit"

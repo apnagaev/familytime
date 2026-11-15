@@ -3,13 +3,23 @@
 <h1>{{ 'Семьи' if user.admin else 'Семья' }}</h1>
 
 {% for f in families %}
-{% set m = msg(f.messages) %}
+{% set m = msg(f.messages, f.kind) %}
 <div class="card">
   <form method="post" action="/family/{{ f.id }}" class="row">
     <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="name">
     <input type="text" name="name" value="{{ f.name }}" style="font-size: 18px; font-weight: 600">
     <button class="ghost">Переименовать</button>
   </form>
+  {% if user.admin %}
+  <form method="post" action="/family/{{ f.id }}" class="row" style="margin-top: 6px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="kind">
+    <label class="small">Тип <select name="kind">
+      {% for k, label in kind_options.items() %}<option value="{{ k }}" {{ 'selected' if f.kind == k }}>{{ label }}</option>{% endfor %}
+    </select></label>
+    <button class="ghost">Сменить тип</button>
+  </form>
+  <p class="hint">Тип задаёт, как выглядит портал у её родителей и детей, тексты на компьютерах и значения по умолчанию для новых. Группа перейдёт на другую вкладку.</p>
+  {% endif %}
 
   <label class="block">Дети</label>
   <div class="row">
@@ -35,13 +45,17 @@
   <form method="post" action="/family/{{ f.id }}">
     <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="messages">
     <label class="block">Сообщения детям</label>
-    <p class="hint">Подстановки: <code>{name}</code> — имя ребёнка, <code>{limit}</code> — лимит на сегодня, <code>{used}</code> — потрачено, <code>{left}</code> — осталось (в предупреждении), <code>{from}</code>, <code>{to}</code> — свободное время. Пустое поле — текст по умолчанию.</p>
+    <p class="hint">Подстановки: <code>{name}</code> — имя ребёнка, <code>{limit}</code> — лимит на сегодня, <code>{used}</code> — потрачено, <code>{left}</code> — осталось (в предупреждении), <code>{from}</code>, <code>{to}</code> — свободное время, <code>{block_from}</code>, <code>{block_to}</code> — блокировка. Пустое поле — текст по умолчанию.</p>
     <label class="block small">Предупреждение перед концом времени</label>
     <textarea name="warn" style="min-height: 56px">{{ m.warn }}</textarea>
     <label class="block small">Время закончилось</label>
     <textarea name="limit" style="min-height: 80px">{{ m.limit }}</textarea>
     <label class="block small">Вне свободного времени</label>
     <textarea name="window" style="min-height: 56px">{{ m.window }}</textarea>
+    <label class="block small">Компьютер заблокирован (время блокировки)</label>
+    <textarea name="block" style="min-height: 56px">{{ m.block }}</textarea>
+    <label class="block small">Окна закрываются в режиме «только учёба»</label>
+    <textarea name="restricted" style="min-height: 40px">{{ m.restricted }}</textarea>
     <div class="row" style="margin-top: 8px"><button>Сохранить сообщения</button></div>
   </form>
 

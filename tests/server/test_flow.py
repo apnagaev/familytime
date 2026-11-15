@@ -44,7 +44,7 @@ def client(calls):
         if req.url.host == "locator.api.maps.yandex.ru":
             if req.url.params["apikey"] == "bad":
                 return httpx.Response(403, text="Access denied")
-            return httpx.Response(200, json={"location": {"point": {"lat": 55.89, "lon": 37.41},
+            return httpx.Response(200, json={"location": {"point": {"lat": 55.75, "lon": 37.61},
                                                           "accuracy": 35}})
         if req.url.host == "traccar" and req.url.path == "/api/devices" and req.method == "GET":
             return httpx.Response(200, json=[])
@@ -194,7 +194,7 @@ def test_full_flow(client, calls):
     r = c.post("/api/agent/location", headers={**h, "X-Real-IP": "95.31.1.2"}, json={
         "wifi": [{"bssid": "AA-BB-CC-DD-EE-FF", "rssi": -50}, {"bssid": "bad", "rssi": -60}],
         "battery": 77, "on_ac": False, "session": "active", "user": "ivan"}).json()
-    assert r["ok"] and r["sent"] and r["lat"] == 55.89
+    assert r["ok"] and r["sent"] and r["lat"] == 55.75
     loc = [x for x in calls if x.url.host == "locator.api.maps.yandex.ru"][-1]
     sent = json.loads(loc.content)
     assert sent["wifi"] == [{"bssid": "aa:bb:cc:dd:ee:ff", "signal_strength": -50}]

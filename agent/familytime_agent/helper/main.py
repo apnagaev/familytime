@@ -30,7 +30,7 @@ from .ui import UI
 log = logging.getLogger("familytime.helper")
 
 TITLES = {"warn": "Скоро конец времени", "limit": "Время закончилось",
-          "window": "Сейчас время для учёбы", "info": "Только учёба"}
+          "window": "Сейчас не свободное время", "info": "Ограничение"}
 
 
 class Helper:
@@ -47,6 +47,7 @@ class Helper:
         self.close_sent: dict[int, float] = {}
         self.wifi: dict | None = None
         self.fg: dict = {}
+        self.locked_at = 0.0
         self.tabs_closed: set[str] = set()
         self.wifi_at = 0.0
         self.browsers = {"chrome.exe", "msedge.exe", "browser.exe"}
@@ -163,6 +164,12 @@ class Helper:
                     winutil.send_ctrl("w")
         lost = d.get("lost")
         self.ui.set_lost(lost["message"] if lost else None)
+        block = d.get("block")
+        self.ui.set_overlay("block", block["message"] if block else None, "#1f2328")
+        if d.get("lock") and now - self.locked_at > 2 and not winutil.desktop_locked():
+            self.locked_at = now
+            log.info("блокирую экран")
+            winutil.user32.LockWorkStation()
         if d.get("want_wifi") and now - self.wifi_at > 240:
             self.wifi_at = now
             threading.Thread(target=self._scan_wifi, daemon=True).start()
@@ -187,6 +194,20 @@ class Helper:
         self.root.mainloop()
 
 
+def dpi_aware() -> None:
+    """Настоящие пиксели вместо масштабированных: иначе окна на весь экран при масштабе
+    125–150 % покрывают только его часть."""
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # per-monitor v2
+        return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        ctypes.windll.user32.SetProcessDPIAware()
+
+
 def main() -> None:
     mutex = win32event.CreateMutex(None, False, "Local\\FamilyTimeHelper")
     if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
@@ -197,6 +218,7 @@ def main() -> None:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", encoding="utf-8")
     logging.getLogger("comtypes").setLevel(logging.WARNING)    # генерация обёрток — шум
     log.info("помощник %s запущен, pid %s", VERSION, os.getpid())
+    dpi_aware()
     try:
         Helper().run()
     finally:
