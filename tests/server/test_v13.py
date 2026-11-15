@@ -5,7 +5,7 @@ import math
 import os
 import random
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 import httpx
@@ -281,3 +281,73 @@ def test_base_url_by_host():
     assert cfg.base_url("evil.example.org") == "https://kids.example.com"
     assert cfg.company_url == "https://work.example.com"
 
+
+
+def _agent_rules():
+    import importlib.util, pathlib
+    path = pathlib.Path(__file__).resolve().parents[2] / "agent/familytime_agent/core/rules.py"
+    spec = importlib.util.spec_from_file_location("agent_rules", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_lock_now_until_time(env):
+    c, _ = env
+    t = login(c, "mom")
+    c.post("/children", data={"username": "ivan", "display_name": "Ваня", "csrf": t})
+    assert "Заблокировать" in c.get("/dashboard").text
+    r = c.post("/child/ivan/lock", data={"until": "60", "csrf": t, "ret": "/dashboard"})
+    assert "Заблокировано до" in r.text and "заблокирован до" in r.text
+    tz = c.app.state.cfg.tz
+    now = datetime.now(timezone.utc).astimezone(tz)
+    h = enroll(c)
+    p = c.post("/api/agent/heartbeat", headers=h, json={
+        "seq": 1, "caps": ["userlists"], "user": "ivan"}).json()["users"]["ivan"]
+    assert p["mode"] == "blocked" and p["reason"] == "manual"
+    rule = p["rules"][str(now.weekday())] if (now + timedelta(minutes=61)).date() == now.date() \
+        else p["rules"][str(now.weekday())]
+    assert rule["block_from"] and rule["block_to"]
+    end = rule["block_to"] if rule["block_to"] != "00:00" else p["rules"][
+        str((now.weekday() + 1) % 7)]["block_to"]
+    assert end in p["messages"]["block"]
+    # агент (и старый 1.3.0) сам считает «заблокирован» по правилам, в том числе без связи
+    ar = _agent_rules()
+    pol = dict(p)
+    assert ar.evaluate(pol, now.replace(tzinfo=None), 0)["mode"] == "blocked"
+    later = (now + timedelta(minutes=62)).replace(tzinfo=None)
+    pol_later = dict(p, day=later.date().isoformat())
+    assert ar.evaluate(pol_later, later, 0)["mode"] != "blocked"
+    # своё сообщение и «до ЧЧ:ММ»
+    c.post("/child/ivan/lock", data={"at": "07:00", "message": "Ужинать! До {block_to}", "csrf": t})
+    p = c.post("/api/agent/heartbeat", headers=h, json={
+        "seq": 2, "caps": ["userlists"], "user": "ivan"}).json()["users"]["ivan"]
+    assert p["messages"]["block"] == "Ужинать! До 07:00"
+    # снять
+    assert "Блокировка снята" in c.post("/child/ivan/unlock", data={"csrf": t}).text
+    p = c.post("/api/agent/heartbeat", headers=h, json={
+        "seq": 3, "caps": ["userlists"], "user": "ivan"}).json()["users"]["ivan"]
+    assert p["mode"] != "blocked"
+    # истёкшая блокировка не действует
+    run_sql("UPDATE ft_children SET lock_until = now() - interval '1 minute'")
+    assert "заблокирован до" not in c.get("/dashboard").text
+    # чужой родитель
+    t2 = login(c, "stranger")
+    r = c.post("/child/ivan/lock", data={"until": "60", "csrf": t2})
+    assert r.status_code in (403, 404)
+
+
+def test_lock_rules_across_midnight():
+    from datetime import timedelta as td
+    from app.agent_api import lock_rules
+    import zoneinfo
+    tz = zoneinfo.ZoneInfo("Europe/Moscow")
+    now = datetime(2026, 11, 16, 22, 30, 20, tzinfo=tz)        # понедельник
+    rules = {str(d): {"block_from": None, "block_to": None} for d in range(7)}
+    lock_rules(rules, now, now.replace(hour=7, minute=0, second=0) + td(days=1))
+    assert rules["0"] == {"block_from": "22:29", "block_to": "00:00"}
+    assert rules["1"] == {"block_from": "00:00", "block_to": "07:00"}
+    ar = _agent_rules()
+    from datetime import time as t_
+    assert ar.in_block(rules["0"], t_(23, 59)) and ar.in_block(rules["1"], t_(6, 59))
+    assert not ar.in_block(rules["1"], t_(7, 0)) and not ar.in_block(rules["0"], t_(22, 0))

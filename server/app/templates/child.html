@@ -1,7 +1,15 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m with context %}
 {% block content %}
 <div class="spread"><h1>{{ child.display_name }} <span class="muted small">{{ child.username }}</span></h1></div>
 {% include "_stats.html" %}
+
+<div class="card">
+  <h2>Заблокировать сейчас</h2>
+  {% if st.reason == 'manual' %}<p>Компьютер заблокирован до <b>{{ fmt_time(st.lock_until.time()) }}</b>{% if st.lock_until.date() != today %} завтра{% endif %}{% if st.lock_by %} ({{ st.lock_by }}){% endif %}.{% if st.lock_message %} Сообщение: «{{ st.lock_message }}».{% endif %}</p>{% endif %}
+  {{ m.lock_form(child, st, '/child/' ~ child.username, full=True) }}
+  <p class="hint">Экран блокируется в течение минуты на любом компьютере, где {{ child.display_name }} вошёл в Windows, и при каждом новом входе. В выбранное время блокировка снимается сама, в том числе без связи с сервером. Пустое сообщение — текст «блокировки» из настроек семьи, {block_to} в нём — время снятия.</p>
+</div>
 
 <div class="card">
   <h2>Время сегодня</h2>

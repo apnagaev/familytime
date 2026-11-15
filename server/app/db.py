@@ -208,7 +208,15 @@ async def child_status(conn, username: str, now_local: datetime) -> dict:
     bonus = await bonus_minutes(conn, username, day)
     counted, free = await usage(conn, username, day)
     st = policy.compute_status(rule, bonus, counted, now_local)
-    st.update(day=day, rule=rule, bonus_minutes=bonus, free_seconds=free, rules=rules)
+    st.update(day=day, rule=rule, bonus_minutes=bonus, free_seconds=free, rules=rules,
+              lock_until=None, lock_message="", lock_by="")
+    lk = await conn.fetchrow(
+        "SELECT lock_until, lock_message, lock_by FROM ft_children WHERE username = $1", username)
+    if lk and lk["lock_until"] and lk["lock_until"] > now_local:
+        # блокировка «прямо сейчас»: сильнее лимита, окна и правил
+        st.update(mode="blocked", reason="manual",
+                  lock_until=lk["lock_until"].astimezone(now_local.tzinfo),
+                  lock_message=lk["lock_message"], lock_by=lk["lock_by"])
     return st
 
 

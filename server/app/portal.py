@@ -67,7 +67,9 @@ def _templates(loader=None) -> Jinja2Templates:
                                         autoescape=True))
     t.env.globals.update(
         fmt=policy.fmt_minutes, fmt_time=policy.fmt_time, WEEKDAYS=policy.WEEKDAYS,
-        WEEKDAYS_SHORT=policy.WEEKDAYS_SHORT)
+        WEEKDAYS_SHORT=policy.WEEKDAYS_SHORT,
+        LOCK_CHOICES={"30": "на 30 мин", "60": "на 1 ч", "120": "на 2 ч", "eod": "до конца дня",
+                      "morning": "до 7:00 утра"})
     return t
 
 
@@ -417,6 +419,60 @@ async def child_bonus(request: Request, username: str, minutes: int = Form(...),
                            u.username)
     word = f"+{minutes}" if minutes > 0 else str(minutes)
     return back(ret if ret.startswith("/") else f"/child/{username}", ok=f"Сегодня {word} мин")
+
+
+def lock_until_from(choice: str, at: str, nl: datetime) -> datetime | None:
+    """Время снятия блокировки: пресет или «до ЧЧ:ММ» (сегодня, а если прошло — завтра)."""
+    if at:
+        try:
+            t = time.fromisoformat(at)
+        except ValueError:
+            return None
+        until = nl.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        return until if until > nl else until + timedelta(days=1)
+    if choice.isdigit():
+        return nl + timedelta(minutes=max(1, min(24 * 60, int(choice))))
+    midnight = nl.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    if choice == "eod":
+        return midnight
+    if choice == "morning":
+        seven = nl.replace(hour=7, minute=0, second=0, microsecond=0)
+        return seven if seven > nl else seven + timedelta(days=1)
+    return None
+
+
+@router.post("/child/{username}/lock")
+async def child_lock(request: Request, username: str, until: str = Form(""), at: str = Form(""),
+                     message: str = Form(""), csrf: str = Form(""), ret: str = Form("")):
+    """Заблокировать компьютер прямо сейчас; снимается само во время снятия."""
+    u = need_parent(request)
+    auth.check_csrf(request, u, csrf)
+    url = ret if ret.startswith("/") else f"/child/{username}"
+    nl = now_local(request)
+    end = lock_until_from(until, at.strip(), nl)
+    if not end:
+        return back(url, err="Не понял, до какого времени блокировать")
+    end = min(end, nl + timedelta(hours=24))
+    async with request.app.state.pool.acquire() as conn:
+        await child_access(conn, u, username)
+        await conn.execute(
+            "UPDATE ft_children SET lock_until = $2, lock_message = $3, lock_by = $4 "
+            "WHERE username = $1", username, end, message.strip()[:500], u.username)
+    when = policy.fmt_time(end.time()) + ("" if end.date() == nl.date() else " завтра")
+    return back(url, ok=f"Заблокировано до {when}. Компьютер заблокируется в течение минуты")
+
+
+@router.post("/child/{username}/unlock")
+async def child_unlock(request: Request, username: str, csrf: str = Form(""),
+                       ret: str = Form("")):
+    u = need_parent(request)
+    auth.check_csrf(request, u, csrf)
+    async with request.app.state.pool.acquire() as conn:
+        await child_access(conn, u, username)
+        await conn.execute("UPDATE ft_children SET lock_until = NULL WHERE username = $1",
+                           username)
+    return back(ret if ret.startswith("/") else f"/child/{username}",
+                ok="Блокировка снята, компьютер разблокируется в течение минуты")
 
 
 @router.post("/child/{username}/bonus/{bonus_id}/delete")

@@ -193,12 +193,18 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
         "block_from": policy.fmt_time(rule.block_from),
         "block_to": policy.fmt_time(rule.block_to),
     }
+    if st["lock_until"]:
+        values["block_to"] = policy.fmt_time(_ceil_minute(st["lock_until"]).time())
     fam = await conn.fetchrow("SELECT messages, kind FROM ft_families WHERE id = $1",
                               child["family_id"])
     msgs = policy.family_messages(fam["messages"] if fam else None,
                                   fam["kind"] if fam else "family")
     cs = policy.child_settings(child["settings"])
     eff = await lists.effective(conn, child)
+    messages = {k: policy.render(msgs.get(k, ""), values)
+                for k in ("warn", "limit", "window", "block", "restricted")}
+    if st["lock_until"] and st["lock_message"]:
+        messages["block"] = policy.render(st["lock_message"], values)
     return {
         "child": True,
         "name": child["display_name"],
@@ -209,14 +215,13 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
         "counted_seconds": st["counted_seconds"],
         "remaining_seconds": st["remaining_seconds"],
         "window_change_in": st["window_change_in"],
-        "messages": {k: policy.render(msgs.get(k, ""), values)
-                     for k in ("warn", "limit", "window", "block", "restricted")},
+        "messages": messages,
         "lists_version": eff["version"],
         "restricted_kill": cs["restricted_kill"],
         "idle_minutes": int(cs["idle_minutes"]),
         "warn_minutes": [int(x) for x in cs["warn_minutes"]],
         # на случай работы без связи: правила недели, бонусы не учитываются
-        "rules": {
+        "rules": lock_rules({
             str(wd): {
                 "limit": r.limit_minutes,
                 "from": policy.fmt_time(r.window_from) or None,
@@ -224,8 +229,31 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
                 "block_from": policy.fmt_time(r.block_from) or None,
                 "block_to": policy.fmt_time(r.block_to) or None,
             } for wd, r in st["rules"].items()
-        },
+        }, now_local, st["lock_until"]),
     }
+
+
+def _ceil_minute(dt: datetime) -> datetime:
+    return dt if not (dt.second or dt.microsecond) else \
+        dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+
+
+def lock_rules(rules: dict, now_local: datetime, until: datetime | None) -> dict:
+    """Блокировка «прямо сейчас» как интервал блокировки в правилах сегодняшнего дня
+    (и завтрашнего до времени снятия, если через полночь). Так её выполняет любой агент,
+    в том числе без связи, и она снимается сама в назначенное время."""
+    if not until or until <= now_local:
+        return rules
+    start = now_local.replace(second=0, microsecond=0) - timedelta(minutes=1)
+    end = _ceil_minute(until)
+    today = rules[str(now_local.weekday())]
+    if end.date() == now_local.date():
+        today.update(block_from=start.strftime("%H:%M"), block_to=end.strftime("%H:%M"))
+    else:
+        today.update(block_from=start.strftime("%H:%M"), block_to="00:00")
+        if end.time() != datetime.min.time():
+            rules[str(end.weekday())].update(block_from="00:00", block_to=end.strftime("%H:%M"))
+    return rules
 
 
 # ---------- обработчики ----------
