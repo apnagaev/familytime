@@ -29,8 +29,9 @@
       <select name="family_id"><option value="">без семьи</option>{% for f in families %}<option value="{{ f.id }}" {{ 'selected' if f.id == d.family_id }}>{{ f.name }}</option>{% endfor %}</select>
       {% endif %}
       <label><input type="checkbox" name="lost" value="1" {{ 'checked' if d.lost }}> потерян</label>
-      <label><input type="checkbox" name="lost_lock" value="1" {{ 'checked' if d.lost_lock }}> блокировать вход</label>
+      <label title="Действует только вместе с «потерян»"><input type="checkbox" name="lost_lock" value="1" {{ 'checked' if d.lost_lock }}> и блокировать вход</label>
     </div>
+    {% if d.lost_lock and not d.lost %}<p class="hint">Блокировка входа включится, только когда отмечено «потерян». Чтобы ребёнок не пользовался компьютером в определённые часы, задайте «Блокировка с / до» в правилах на его странице.</p>{% endif %}
     <label class="block small">Сообщение на экране, если потерян (пусто — из настроек)</label>
     <textarea name="lost_message" style="min-height: 50px">{{ d.lost_message }}</textarea>
     <div class="row"><button>Сохранить</button></div>
