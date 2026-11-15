@@ -367,16 +367,25 @@ def test_lock_rules_across_midnight():
     assert not ar.in_block(rules["1"], t_(7, 0)) and not ar.in_block(rules["0"], t_(22, 0))
 
 
-def _package(version="1.4.0"):
+def _package(version="1.4.0", sep="/"):
     import io
     import zipfile
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("install.ps1", "# install")
         z.writestr("uninstall.ps1", "# uninstall")
-        z.writestr("FamilyTime/familytime-agent.exe", b"MZ" + b"0" * 1000)
-        z.writestr("FamilyTime/version.txt", version + "\r\n")
+        z.writestr(f"FamilyTime{sep}familytime-agent.exe", b"MZ" + b"0" * 1000)
+        z.writestr(f"FamilyTime{sep}version.txt", "\ufeff" + version + "\r\n")
     return buf.getvalue()
+
+
+def test_package_from_windows_powershell(env):
+    """Compress-Archive в Windows PowerShell 5.1 пишет пути через обратную косую черту."""
+    c, _ = env
+    ta = login(c, "root", admin=True)
+    r = c.post("/settings/agent", data={"csrf": ta},
+               files={"package": ("FamilyTime-1.4.0.zip", _package("1.4.0", "\\"), "application/zip")})
+    assert r.status_code == 200 and "Агент 1.4.0 загружен" in r.text
 
 
 def test_install_outside_domain(env):
