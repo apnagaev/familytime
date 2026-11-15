@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import db, lists, locator, policy
+from . import db, dist, lists, locator, policy
 
 router = APIRouter(prefix="/api/agent")
 
@@ -260,21 +260,32 @@ def lock_rules(rules: dict, now_local: datetime, until: datetime | None) -> dict
 
 @router.post("/enroll")
 async def enroll(body: EnrollIn, request: Request):
+    """Регистрация: общий секрет (GPO, домен) или код установки родителя — тогда компьютер
+    сразу попадает в его семью с режимом из кода."""
     cfg = request.app.state.cfg
-    if not cfg.enroll_secret or not hmac.compare_digest(body.secret, cfg.enroll_secret):
-        raise HTTPException(403, "bad secret")
     hostname = body.hostname.strip().lower()
     mode = body.mode if body.mode in ("control", "track") else "control"
     token = secrets.token_urlsafe(32)
     async with request.app.state.pool.acquire() as conn:
+        code = None
+        if not cfg.enroll_secret or not hmac.compare_digest(body.secret, cfg.enroll_secret):
+            code = await dist.find_code(conn, body.secret)
+            if not code:
+                raise HTTPException(403, "bad secret")
+            mode = code["mode"]
         await conn.execute(
-            """INSERT INTO ft_devices (hostname, token_hash, mode, os_version, agent_version, last_ip)
-               VALUES ($1, $2, $3, $4, $5, $6)
+            """INSERT INTO ft_devices (hostname, token_hash, mode, os_version, agent_version, last_ip,
+                                       family_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
                ON CONFLICT (hostname) DO UPDATE SET token_hash = EXCLUDED.token_hash,
                  os_version = EXCLUDED.os_version, agent_version = EXCLUDED.agent_version,
-                 last_seq = 0""",
+                 last_seq = 0,
+                 mode = CASE WHEN $8 THEN EXCLUDED.mode ELSE ft_devices.mode END,
+                 family_id = CASE WHEN $8 THEN EXCLUDED.family_id ELSE ft_devices.family_id END""",
             hostname, token_hash(token), mode, body.os[:200], body.agent_version[:50],
-            client_ip(request))
+            client_ip(request), code["family_id"] if code else None, code is not None)
+        if code:
+            await dist.use_code(conn, code)
     return {"token": token, "hostname": hostname}
 
 
@@ -387,7 +398,8 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
         child_set = policy.child_settings(kids[cur_child]["settings"]) if cur_child else None
         kind = await conn.fetchval("SELECT kind FROM ft_families WHERE id = $1",
                                    dev["family_id"]) or "family"
-    return {
+        update = await dist.update_offer(conn, settings, body.caps, body.agent_version)
+    out = {
         "server_time": now.timestamp(),
         "utc_offset": int(now_local.utcoffset().total_seconds()),
         "accepted": accepted,
@@ -395,6 +407,9 @@ async def heartbeat(body: HeartbeatIn, request: Request, dev=Depends(current_dev
         "device": device_policy(cfg, dev, settings, union, body.caps, child_set, kind),
         "users": policies,
     }
+    if update:
+        out["update"] = update
+    return out
 
 
 class ListsIn(BaseModel):

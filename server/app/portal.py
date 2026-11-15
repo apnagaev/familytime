@@ -62,12 +62,16 @@ class CompanyLoader(FileSystemLoader):
         return company_text(src), path, uptodate
 
 
+def _vtuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4]) or (0,)
+
+
 def _templates(loader=None) -> Jinja2Templates:
     t = Jinja2Templates(env=Environment(loader=loader or FileSystemLoader(TEMPLATE_DIR),
                                         autoescape=True))
     t.env.globals.update(
         fmt=policy.fmt_minutes, fmt_time=policy.fmt_time, WEEKDAYS=policy.WEEKDAYS,
-        WEEKDAYS_SHORT=policy.WEEKDAYS_SHORT,
+        WEEKDAYS_SHORT=policy.WEEKDAYS_SHORT, vtuple=_vtuple,
         LOCK_CHOICES={"30": "на 30 мин", "60": "на 1 ч", "120": "на 2 ч", "eod": "до конца дня",
                       "morning": "до 7:00 утра"})
     return t
@@ -747,8 +751,10 @@ async def settings_page(request: Request):
             """SELECT device, net, place, max(at) AS at, count(*) AS n
                FROM ft_phone_fixes WHERE at > now() - interval '1 day'
                GROUP BY device, net, place ORDER BY max(at) DESC LIMIT 20""")
+        from .dist import settings_extra
+        extra = await settings_extra(conn)
     return page(request, "settings.html", u, s=s, phones=phones,
-                ip_locations=locator.format_ip_locations(s["ip_locations"]))
+                ip_locations=locator.format_ip_locations(s["ip_locations"]), **extra)
 
 
 @router.post("/settings")
@@ -756,6 +762,10 @@ async def settings_save(request: Request):
     u = need_admin(request)
     form = await request.form()
     auth.check_csrf(request, u, str(form.get("csrf", "")))
+    if form.get("only") == "auto_update":
+        async with request.app.state.pool.acquire() as conn:
+            await db.set_setting(conn, "auto_update", form.get("auto_update") == "1", u.username)
+        return back("/settings", ok="Сохранено")
     try:
         loc = {"interval_minutes": max(1, min(240, int(form.get("interval_minutes", 15)))),
                "lost_interval_minutes": max(1, min(60, int(form.get("lost_interval_minutes", 2))))}
@@ -796,8 +806,12 @@ async def devices_page(request: Request):
             """SELECT * FROM ft_devices WHERE family_id = ANY($1::bigint[])
                OR ($2 AND family_id IS NULL) ORDER BY hostname""", fams, u.admin)
         families = await db.list_families(conn, None if u.admin else fams)
+        from .dist import devices_extra
+        extra = await devices_extra(conn, u, fams)
+        extra["install_families"] = [f for f in families if f["id"] in fams]
     return page(request, "devices.html", u, devices=devs, families=families,
-                fam_names={f["id"]: f["name"] for f in families}, now=datetime.now(timezone.utc))
+                fam_names={f["id"]: f["name"] for f in families}, now=datetime.now(timezone.utc),
+                **extra)
 
 
 @router.post("/devices/{dev_id}")

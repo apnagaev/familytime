@@ -8,6 +8,10 @@
   powershell -ExecutionPolicy Bypass -File \\server\familytime$\install.ps1
 
 .EXAMPLE
+  # самообновление агента: настройки берутся из %ProgramData%\FamilyTime\config.json
+  .\install.ps1 -Source C:\ProgramData\FamilyTime\update\1.4.1
+
+.EXAMPLE
   .\install.ps1 -ServerUrl https://kids.example.com -EnrollSecret ... -Mode track
 #>
 param(
@@ -31,6 +35,12 @@ try {
     $jsonPath = Join-Path $Source "familytime.json"
     if (Test-Path $jsonPath) {
         (Get-Content $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties |
+            ForEach-Object { $cfg[$_.Name] = $_.Value }
+    }
+    # без параметров и familytime.json (самообновление) — настройки уже установленного агента
+    $oldCfg = Join-Path (Join-Path $env:ProgramData $Name) "config.json"
+    if (-not $cfg.server_url -and -not $ServerUrl -and (Test-Path $oldCfg)) {
+        (Get-Content $oldCfg -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties |
             ForEach-Object { $cfg[$_.Name] = $_.Value }
     }
     if ($ServerUrl) { $cfg.server_url = $ServerUrl }
@@ -59,6 +69,14 @@ try {
     $cfgChanged = -not (Test-Path $cfgPath) -or ((Get-Content $cfgPath -Raw) -ne $cfgJson)
 
     if (-not $Force -and $svc -and $curVer -eq $newVer -and -not $cfgChanged) {
+        if ($svc.Status -ne "Running") { Start-Service $Name }
+        exit 0
+    }
+    # более старую версию поверх новой не ставим (старая папка GPO после самообновления)
+    $older = $false
+    try { $older = $curVer -and ([version]$newVer -lt [version]$curVer) } catch { }
+    if (-not $Force -and $svc -and $older -and -not $cfgChanged) {
+        Log "пропуск: установлена $curVer, источник $newVer старше"
         if ($svc.Status -ne "Running") { Start-Service $Name }
         exit 0
     }

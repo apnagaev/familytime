@@ -98,6 +98,7 @@ class FakeClient:
         self.lists_calls = 0
         self.user_lists = {}
         self.user_lists_calls = []
+        self.update = None
 
     def post(self, path, body, token=""):
         self.calls.append((path, body))
@@ -115,9 +116,12 @@ class FakeClient:
                           if k not in ("edu_apps", "edu_domains", "blocked_apps",
                                        "restricted_domains")}
                 device["lists_version"] = self.lists_version
-            assert body.get("caps") == ["lists", "userlists"]
-            return {"server_time": self.clock(), "utc_offset": 10800, "device": device,
-                    "users": {"ivan": policy(self.server_counted, self.limit)}}
+            assert body.get("caps") == ["lists", "userlists", "update"]
+            out = {"server_time": self.clock(), "utc_offset": 10800, "device": device,
+                   "users": {"ivan": policy(self.server_counted, self.limit)}}
+            if self.update:
+                out["update"] = self.update
+            return out
         if path.endswith("/lists"):
             self.lists_calls += 1
             if body.get("user"):                       # сервер 1.2: списки ребёнка
@@ -486,3 +490,35 @@ def test_rules_per_child_on_shared_pc(tmp_path):
     eng2 = Engine({"server_url": "https://x", "enroll_secret": "e"},
                   Store(str(tmp_path / "s.json")), plat, cli, clock=clk.wall, mono=clk.mono)
     assert set(eng2.lists["users"]) == {"ivan", "masha"}
+
+
+def test_self_update_offer(tmp_path):
+    eng, clk, plat, cli = make(tmp_path)
+    calls = []
+    plat.self_update = lambda url, sha, ver: calls.append((url, sha, ver))
+    eng.ensure_token(clk.mono())
+    cli.update = {"version": "9.9.9", "sha256": "ab" * 32, "url": "/agent/package.zip"}
+    assert eng.heartbeat(None, None, clk.wall())
+    eng.update_thread.join(5)
+    assert calls == [("https://x/agent/package.zip", "ab" * 32, "9.9.9")]
+    # не чаще раза в 6 часов на версию
+    clk.adv(60)
+    eng.heartbeat(None, None, clk.wall())
+    assert len(calls) == 1
+    clk.adv(6 * 3600)
+    eng.heartbeat(None, None, clk.wall())
+    eng.update_thread.join(5)
+    assert len(calls) == 2
+    # своя версия и сбой — без исключений в цикле
+    from familytime_agent import VERSION
+    cli.update = {"version": VERSION, "sha256": "x"}
+    clk.adv(7 * 3600)
+    eng.heartbeat(None, None, clk.wall())
+    assert len(calls) == 2
+
+    def boom(*a):
+        raise OSError("нет сети")
+    plat.self_update = boom
+    cli.update = {"version": "9.9.10", "sha256": "cd" * 32}
+    assert eng.heartbeat(None, None, clk.wall())
+    eng.update_thread.join(5)

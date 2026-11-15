@@ -192,3 +192,25 @@ ALTER TABLE ft_phone_fixes ADD COLUMN IF NOT EXISTS place text NOT NULL DEFAULT 
 ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS lock_until timestamptz;
 ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS lock_message text NOT NULL DEFAULT '';
 ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS lock_by text NOT NULL DEFAULT '';
+
+-- 1.4: установка вне домена — пакет агента на сервере и коды установки
+CREATE TABLE IF NOT EXISTS ft_agent_packages (
+    version     text PRIMARY KEY,
+    sha256      text NOT NULL,
+    size        bigint NOT NULL,
+    data        bytea NOT NULL,
+    uploaded_at timestamptz NOT NULL DEFAULT now(),
+    uploaded_by text NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS ft_install_codes (
+    id         bigserial PRIMARY KEY,
+    code_hash  text NOT NULL UNIQUE,
+    family_id  bigint REFERENCES ft_families ON DELETE CASCADE,
+    mode       text NOT NULL DEFAULT 'control',
+    created_by text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL,
+    uses       integer NOT NULL DEFAULT 0,
+    last_used  timestamptz,
+    revoked    boolean NOT NULL DEFAULT false
+);

@@ -32,4 +32,23 @@
   </form>
   <p class="hint">Как определяется место: известный адрес → Wi-Fi вокруг (Яндекс Локатор; пока точки и IP те же, прошлое место используется до суток без нового запроса) → без Wi-Fi по внешнему IP, с точностью до города (запоминается на неделю). Действует на все компьютеры всех семей и компаний. Сайты, программы, подписки, простой и предупреждения настраиваются на странице каждого ребёнка, тексты сообщений и чаты Telegram — на странице семьи.</p>
 </div>
+
+<div class="card" id="agent">
+  <h2>Программа для компьютеров вне домена</h2>
+  {% if agent_meta %}<p>На сервере: <b>{{ agent_meta.version }}</b> ({{ (agent_meta.size / 1048576)|round(1) }} МБ, {{ agent_meta.uploaded_at.astimezone(cfg.tz).strftime('%d.%m.%Y %H:%M') }}, {{ agent_meta.uploaded_by }}).</p>
+  {% else %}<p class="muted">Ещё не загружена — родители не смогут скачать установщик.</p>{% endif %}
+  <form method="post" action="/settings/agent" enctype="multipart/form-data" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <input type="file" name="package" accept=".zip" required>
+    <button>Загрузить</button>
+  </form>
+  <p class="hint">Архив <code>FamilyTime-&lt;версия&gt;.zip</code>, который собирает <code>agent\build.ps1</code>. Родители скачивают на странице «Компьютеры» файл <code>FamilyTime-setup.cmd</code> со своим кодом установки; он берёт программу отсюда. Хранятся три последние версии.</p>
+  <form method="post" action="/settings" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <input type="hidden" name="only" value="auto_update">
+    <label><input type="checkbox" name="auto_update" value="1" {{ 'checked' if s.auto_update }}> Обновлять агенты автоматически</label>
+    <button class="ghost">Сохранить</button>
+  </form>
+  <p class="hint">Агенты 1.4 и новее узнают о новой версии при обмене с сервером (раз в минуту), скачивают её, проверяют контрольную сумму и переустанавливаются сами через задание Windows от имени SYSTEM; настройки и регистрация сохраняются. Агенты старше 1.4 так не умеют: на них один раз запустите установщик со страницы «Компьютеры» (или обновите общую папку GPO). Более старую версию поверх новой установщик не ставит, поэтому старая папка GPO обновлённые компьютеры не откатит.</p>
+</div>
 {% endblock %}
