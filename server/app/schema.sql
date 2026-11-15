@@ -185,6 +185,9 @@ CREATE TABLE IF NOT EXISTS ft_phone_fixes (
 CREATE INDEX IF NOT EXISTS ft_phone_fixes_net ON ft_phone_fixes (net, at);
 ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS ext_ip text NOT NULL DEFAULT '';
 
+-- 1.3.2: точки телефонов — журнал для общих настроек (net — адрес, с которого пришла точка)
+ALTER TABLE ft_phone_fixes ADD COLUMN IF NOT EXISTS place text NOT NULL DEFAULT '';
+
 -- 1.3.2: блокировка «прямо сейчас» до заданного времени
 ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS lock_until timestamptz;
 ALTER TABLE ft_children ADD COLUMN IF NOT EXISTS lock_message text NOT NULL DEFAULT '';

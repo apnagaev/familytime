@@ -49,23 +49,7 @@ server {
 }
 
 # --- Точки Traccar Client через FamilyTime -------------------------------------------
-# Вариант 1: в Traccar Client указать адрес https://kids.example.com/osmand —
-# FamilyTime перешлёт точку в Traccar и запомнит её для уточнения места компьютеров.
+# В Traccar Client указать адрес https://kids.example.com/osmand — FamilyTime перешлёт
+# точку в Traccar, а телефону из списка в общих настройках, пришедшему с известного адреса,
+# подставит место из таблицы «Известные адреса».
 # Ничего добавлять не нужно: /osmand обслуживает location / выше.
-#
-# Вариант 2: телефоны не трогать — копировать их точки в FamilyTime из сайта приёма
-# OsmAnd (server { ... } перед Traccar). В его location / добавить:
-#
-#     mirror /familytime-mirror;
-#     mirror_request_body on;
-#
-# и рядом:
-#
-#     location = /familytime-mirror {
-#         internal;
-#         proxy_pass https://kids.example.com/osmand/mirror$is_args$args;
-#         proxy_set_header X-Real-IP $remote_addr;
-#         proxy_set_header Content-Type $content_type;
-#         proxy_connect_timeout 2s;
-#         proxy_read_timeout 5s;
-#     }

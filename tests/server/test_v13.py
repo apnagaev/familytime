@@ -137,49 +137,58 @@ def test_traccar_client_points(env):
     c, calls = env
     t = login(c, "root", admin=True)
     c.post("/settings", data={"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2",
-                              "phone_ids": "my-phone", "jitter": "1"})
-    # GET с параметрами — пересылается в Traccar как есть, точка запоминается
-    r = c.get("/osmand?id=my-phone&lat=55.7520&lon=37.6175&accuracy=8&timestamp=1",
+                              "phone_ids": "my-phone", "jitter": "",
+                              "ip_locations": "10.20.30.0/24 55.75 37.61 40 Дом\n"
+                                              "95.31.1.0/24 55.70 37.50 100 Дача"})
+
+    def last():
+        return [x for x in calls if x.url.host == "traccar"][-1]
+    # телефон из списка во внутренней сети дома — место из таблицы, точность таблицы
+    r = c.get("/osmand?id=my-phone&lat=55.7520&lon=37.6175&accuracy=8&timestamp=1&batt=50",
               headers={"X-Real-IP": "10.20.30.50"})
     assert r.status_code == 200 and r.text == "ok"
-    fwd = [x for x in calls if x.url.host == "traccar"][-1]
-    assert fwd.method == "GET" and fwd.url.params["id"] == "my-phone"
-    assert fwd.headers["x-real-ip"] == "10.20.30.50"
-    # JSON (новый Traccar Client) — POST с телом, пересылается тело
+    f = last()
+    assert f.method == "GET" and f.headers["x-real-ip"] == "10.20.30.50"
+    q = f.url.params
+    assert (q["id"], q["lat"], q["lon"], q["accuracy"], q["source"], q["place"], q["batt"],
+            q["timestamp"]) == ("my-phone", "55.750000", "37.610000", "40", "known-ip", "Дом", "50", "1")
+    # JSON (новый Traccar Client) с внешнего известного адреса
     body = {"device_id": "my-phone", "location": {"timestamp": "2026-11-15T10:00:00Z",
-            "coords": {"latitude": 55.75, "longitude": 37.61, "accuracy": 12}}}
-    r = c.post("/osmand", json=body, headers={"X-Real-IP": "95.31.1.20"})
-    fwd = [x for x in calls if x.url.host == "traccar"][-1]
-    assert fwd.method == "POST" and json.loads(fwd.content) == body
-    # чужой телефон — пересылается, но не запоминается; mirror — без пересылки
-    n = len(calls)
-    c.get("/osmand?id=stranger&lat=1&lon=1&accuracy=5", headers={"X-Real-IP": "95.31.1.20"})
-    c.get("/osmand/mirror?id=my-phone&lat=55.8&lon=37.4&accuracy=500",
-          headers={"X-Real-IP": "95.31.1.20"})
-    assert len([x for x in calls[n:] if x.url.host == "traccar"]) == 1
-    rows = run_sql("SELECT net, device, accuracy FROM ft_phone_fixes ORDER BY id", fetch=True)
-    assert [(r["net"], r["accuracy"]) for r in rows] == [
-        ("10.20.30.0/24", 8), ("95.31.1.20", 12), ("95.31.1.20", 500)]
-    assert "my-phone" in c.get("/settings").text
-
+            "coords": {"latitude": 55.9, "longitude": 37.9, "accuracy": 12}}}
+    c.post("/osmand", json=body, headers={"X-Real-IP": "95.31.1.20"})
+    j = json.loads(last().content)
+    assert j["location"]["coords"] == {"latitude": 55.7, "longitude": 37.5, "accuracy": 100}
+    assert j["location"]["extras"] == {"source": "known-ip", "place": "Дача"}
+    # форма
+    c.post("/osmand", data={"id": "my-phone", "lat": "1", "lon": "2", "accuracy": "5"},
+           headers={"X-Real-IP": "10.20.30.7"})
+    assert "lat=55.750000" in last().content.decode()
+    # неизвестный адрес или чужой телефон — как есть
+    c.get("/osmand?id=my-phone&lat=55.9&lon=37.9&accuracy=7", headers={"X-Real-IP": "8.8.8.8"})
+    assert last().url.params["lat"] == "55.9" and "source" not in last().url.params
+    c.get("/osmand?id=stranger&lat=55.9&lon=37.9&accuracy=7", headers={"X-Real-IP": "10.20.30.50"})
+    assert last().url.params["lat"] == "55.9"
+    # разброс в пределах точности
+    c.post("/settings", data={"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2",
+                              "phone_ids": "my-phone", "jitter": "1",
+                              "ip_locations": "10.20.30.0/24 55.75 37.61 40 Дом"})
+    c.get("/osmand?id=my-phone&lat=55.9&lon=37.9", headers={"X-Real-IP": "10.20.30.50"})
+    q = last().url.params
+    d = math.hypot((float(q["lat"]) - 55.75) * 111320,
+                   (float(q["lon"]) - 37.61) * 111320 * math.cos(math.radians(55.75)))
+    assert d <= 41
+    # журнал в настройках; компьютеры по телефонам не уточняются
+    page = c.get("/settings").text
+    assert "my-phone" in page and "stranger" not in page and "Дом" in page
     h = enroll(c)
-    # компьютер в той же домашней сети (другой внутренний адрес) — место телефона
-    r = c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.88"}, json={
-        "wifi": [{"bssid": "aa:bb:cc:00:00:01", "rssi": -40}], "session": "active"}).json()
-    assert r["source"] == "phone-gps" and r["lat"] == 55.7520 and r["accuracy"] == 8
-    # по внешнему адресу; неточная точка (500 м) не используется
-    r = c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.9.9.9"}, json={
-        "wifi": [], "session": "active", "ext_ip": "95.31.1.20"}).json()
-    assert r["source"] == "phone-gps" and r["accuracy"] == 12
-    # устаревшая точка не используется
-    run_sql("UPDATE ft_phone_fixes SET at = now() - interval '2 hours'")
     r = c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.88"}, json={
         "wifi": [], "session": "active"}).json()
+    assert r["source"] == "known-ip"
+    run_sql("TRUNCATE ft_phone_fixes")
+    r = c.post("/api/agent/location", headers={**h, "X-Real-IP": "172.16.5.5"}, json={
+        "wifi": [], "session": "active"}).json()
     assert r["ok"] is False
-    # нет координат — пересылается, но не сохраняется
-    n = len(run_sql("SELECT 1 FROM ft_phone_fixes", fetch=True))
-    c.get("/osmand?id=my-phone&batt=50", headers={"X-Real-IP": "95.31.1.20"})
-    assert len(run_sql("SELECT 1 FROM ft_phone_fixes", fetch=True)) == n
+    assert c.get("/osmand/mirror?id=my-phone&lat=1&lon=1").status_code == 404
 
 
 def test_company_wording(env):

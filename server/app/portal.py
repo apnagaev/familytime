@@ -744,9 +744,9 @@ async def settings_page(request: Request):
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
         phones = await conn.fetch(
-            """SELECT device, net, max(at) AS at, count(*) AS n, min(accuracy) AS best
+            """SELECT device, net, place, max(at) AS at, count(*) AS n
                FROM ft_phone_fixes WHERE at > now() - interval '1 day'
-               GROUP BY device, net ORDER BY max(at) DESC LIMIT 20""")
+               GROUP BY device, net, place ORDER BY max(at) DESC LIMIT 20""")
     return page(request, "settings.html", u, s=s, phones=phones,
                 ip_locations=locator.format_ip_locations(s["ip_locations"]))
 
@@ -765,18 +765,11 @@ async def settings_save(request: Request):
     known, errors = locator.parse_ip_locations(str(form.get("ip_locations", "")))
     if errors:
         return back("/settings", err="Известные адреса, не разобрано: " + "; ".join(errors[:3]))
-    try:
-        phone_minutes = max(1, min(240, int(form.get("phone_minutes") or 30)))
-        phone_acc = max(5, min(1000, int(form.get("phone_max_accuracy") or 100)))
-    except ValueError:
-        return back("/settings", err="Неверное число")
     phone_ids = [x for x in re.split(r"[\s,;]+", str(form.get("phone_ids", "")).strip()) if x][:100]
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
         await db.set_setting(conn, "jitter", form.get("jitter") == "1", u.username)
         await db.set_setting(conn, "phone_ids", phone_ids, u.username)
-        await db.set_setting(conn, "phone_minutes", phone_minutes, u.username)
-        await db.set_setting(conn, "phone_max_accuracy", phone_acc, u.username)
         await db.set_setting(conn, "ip_locations", known[:500], u.username)
         await db.set_setting(conn, "location", loc, u.username)
         await db.set_setting(conn, "messages", {**s["messages"], "lost": lost}, u.username)
