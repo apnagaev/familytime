@@ -125,6 +125,34 @@ def rewrite(query: str, body: bytes, content_type: str, lat: float, lon: float, 
     return query, body
 
 
+def set_ip(query: str, body: bytes, content_type: str, ip: str) -> tuple[str, bytes]:
+    """Настоящий адрес телефона в точке — как traccar-real-ip.conf перед Traccar: Traccar пишет
+    в атрибут ip адрес соединения (здесь это был бы адрес FamilyTime или шлюза Docker), а
+    заголовки X-Forwarded-For для точек не читает. JSON → location.extras.ip, параметры в
+    адресе → &ip=, иначе form-тело → &ip= (тело Traccar читает, только если в адресе
+    параметров нет). Присланный клиентом ip перезаписывается."""
+    if not ip:
+        return query, body
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if body and (ct == "application/json" or body[:1] == b"{"):
+        try:
+            j = json.loads(body)
+        except ValueError:
+            j = None
+        if isinstance(j, dict):
+            loc = j.get("location") if isinstance(j.get("location"), dict) else j
+            extras = loc.get("extras") if isinstance(loc.get("extras"), dict) else {}
+            extras["ip"] = ip
+            loc["extras"] = extras
+            return query, json.dumps(j, ensure_ascii=False).encode()
+    if query or not (body and ct == "application/x-www-form-urlencoded"):
+        pairs = [(k, v) for k, v in parse_qsl(query, keep_blank_values=True) if k != "ip"]
+        return urlencode(pairs + [("ip", ip)]), body
+    pairs = [(k, v) for k, v in parse_qsl(body.decode("utf-8", "replace"),
+                                          keep_blank_values=True) if k != "ip"]
+    return query, urlencode(pairs + [("ip", ip)]).encode()
+
+
 async def refine(request: Request, point: dict | None, ip: str) -> dict | None:
     """Место из «Известных адресов» для телефона из списка; None — точку не трогать.
     Последние точки телефонов из списка видны в общих настройках."""
@@ -166,6 +194,7 @@ async def _handle(request: Request) -> Response:
     if fix:
         query, body = rewrite(query, body, ctype, fix["lat"], fix["lon"], fix["accuracy"],
                               fix["place"])
+    query, body = set_ip(query, body, ctype, ip)
     target = cfg.osmand_forward_url or cfg.traccar_osmand_url
     if not target:
         return Response(status_code=503)

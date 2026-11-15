@@ -152,17 +152,22 @@ def test_traccar_client_points(env):
     q = f.url.params
     assert (q["id"], q["lat"], q["lon"], q["accuracy"], q["source"], q["place"], q["batt"],
             q["timestamp"]) == ("my-phone", "55.750000", "37.610000", "40", "known-ip", "Дом", "50", "1")
+    assert q["ip"] == "10.20.30.50"
     # JSON (новый Traccar Client) с внешнего известного адреса
     body = {"device_id": "my-phone", "location": {"timestamp": "2026-11-15T10:00:00Z",
             "coords": {"latitude": 55.9, "longitude": 37.9, "accuracy": 12}}}
     c.post("/osmand", json=body, headers={"X-Real-IP": "95.31.1.20"})
     j = json.loads(last().content)
     assert j["location"]["coords"] == {"latitude": 55.7, "longitude": 37.5, "accuracy": 100}
-    assert j["location"]["extras"] == {"source": "known-ip", "place": "Дача"}
+    assert j["location"]["extras"] == {"source": "known-ip", "place": "Дача", "ip": "95.31.1.20"}
     # форма
     c.post("/osmand", data={"id": "my-phone", "lat": "1", "lon": "2", "accuracy": "5"},
            headers={"X-Real-IP": "10.20.30.7"})
-    assert "lat=55.750000" in last().content.decode()
+    assert "lat=55.750000" in last().content.decode() and "ip=10.20.30.7" in last().content.decode()
+    assert "ip" not in last().url.params
+    # присланный телефоном ip заменяется настоящим, у чужих телефонов тоже
+    c.get("/osmand?id=other&lat=1&lon=2&ip=1.1.1.1", headers={"X-Real-IP": "95.31.1.21"})
+    assert last().url.params.get_list("ip") == ["95.31.1.21"]
     # неизвестный адрес или чужой телефон — как есть
     c.get("/osmand?id=my-phone&lat=55.9&lon=37.9&accuracy=7", headers={"X-Real-IP": "8.8.8.8"})
     assert last().url.params["lat"] == "55.9" and "source" not in last().url.params
