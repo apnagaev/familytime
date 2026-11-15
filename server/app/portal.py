@@ -15,14 +15,61 @@ from uuid import UUID
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from jinja2 import Environment, FileSystemLoader
 
 from . import auth, db, lists, locator, policy, requests_logic
 
 router = APIRouter()
-templates = Jinja2Templates(directory=str(Path(__file__).with_name("templates")))
-templates.env.globals.update(
-    fmt=policy.fmt_minutes, fmt_time=policy.fmt_time, WEEKDAYS=policy.WEEKDAYS,
-    WEEKDAYS_SHORT=policy.WEEKDAYS_SHORT)
+TEMPLATE_DIR = str(Path(__file__).with_name("templates"))
+
+# «компания»: те же страницы, другие слова. Замена делается в тексте шаблонов при загрузке,
+# поэтому данные пользователей (имена, сайты), подставленные в шаблон, не затрагиваются.
+COMPANY_WORDS = [
+    ("семьёй", "компанией"), ("семьей", "компанией"), ("семьи", "компании"), ("семью", "компанию"),
+    ("семье", "компании"), ("семей", "компаний"), ("семья", "компания"),
+    ("ребёнком", "сотрудником"), ("ребёнку", "сотруднику"), ("ребёнка", "сотрудника"),
+    ("ребёнке", "сотруднике"), ("ребёнок", "сотрудник"),
+    ("детьми", "сотрудниками"), ("детям", "сотрудникам"), ("детей", "сотрудников"),
+    ("дети", "сотрудники"),
+    ("родителями", "руководителями"), ("родителям", "руководителям"),
+    ("родителей", "руководителей"), ("родителем", "руководителем"), ("родителю", "руководителю"),
+    ("родителя", "руководителя"), ("родители", "руководители"), ("родитель", "руководитель"),
+    ("учёбой", "работой"), ("учёбы", "работы"), ("учёбу", "работу"), ("учёбе", "работе"),
+    ("учёба", "работа"),
+    ("учебными", "рабочими"), ("учебных", "рабочих"), ("учебным", "рабочим"),
+    ("учебные", "рабочие"), ("учебный", "рабочий"), ("учебная", "рабочая"),
+    ("учебное", "рабочее"), ("учебную", "рабочую"),
+    ("свободного времени", "личного времени"), ("свободное время", "личное время"),
+    ("Ваня", "Иван"),
+]
+_COMPANY_RE = [(re.compile(r"\b" + re.escape(a) + r"\b"), b) for a, b in COMPANY_WORDS] + \
+    [(re.compile(r"\b" + re.escape(a[0].upper() + a[1:]) + r"\b"), b[0].upper() + b[1:])
+     for a, b in COMPANY_WORDS]
+
+
+def company_text(text: str) -> str:
+    for rx, repl in _COMPANY_RE:
+        text = rx.sub(repl, text)
+    return text
+
+
+class CompanyLoader(FileSystemLoader):
+    def get_source(self, environment, template):
+        src, path, uptodate = super().get_source(environment, template)
+        return company_text(src), path, uptodate
+
+
+def _templates(loader=None) -> Jinja2Templates:
+    t = Jinja2Templates(env=Environment(loader=loader or FileSystemLoader(TEMPLATE_DIR),
+                                        autoescape=True))
+    t.env.globals.update(
+        fmt=policy.fmt_minutes, fmt_time=policy.fmt_time, WEEKDAYS=policy.WEEKDAYS,
+        WEEKDAYS_SHORT=policy.WEEKDAYS_SHORT)
+    return t
+
+
+templates = _templates()
+company_templates = _templates(CompanyLoader(TEMPLATE_DIR))
 
 STOP_REASON = "закончить на сегодня"
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -83,10 +130,20 @@ async def family_access(conn, u: auth.User, family_id: int):
     return rows[0]
 
 
+def is_company(request: Request) -> bool:
+    """Слова «компании»: по имени сайта (COMPANY_HOSTS), иначе по общей настройке."""
+    cfg = request.app.state.cfg
+    host = (request.headers.get("host") or "").split(":")[0].lower()
+    if cfg.company_hosts:
+        return host in cfg.company_hosts
+    return getattr(request.state, "portal_terms", "family") == "company"
+
+
 def page(request: Request, name: str, user: auth.User | None, **ctx) -> HTMLResponse:
     ctx.update(request=request, user=user, cfg=request.app.state.cfg,
                flash=request.query_params.get("ok", ""), err=request.query_params.get("err", ""))
-    return templates.TemplateResponse(request, name, ctx)
+    t = company_templates if is_company(request) else templates
+    return t.TemplateResponse(request, name, ctx)
 
 
 def back(url: str, ok: str = "", err: str = "") -> RedirectResponse:
@@ -292,16 +349,18 @@ async def child_rules(request: Request, username: str):
             lim = parse_limit(str(form.get(f"limit{wd}", "")))
             a = parse_time(str(form.get(f"from{wd}", "")))
             b = parse_time(str(form.get(f"to{wd}", "")))
-            if (a is None) != (b is None):
+            ba = parse_time(str(form.get(f"bfrom{wd}", "")))
+            bb = parse_time(str(form.get(f"bto{wd}", "")))
+            if (a is None) != (b is None) or (ba is None) != (bb is None):
                 return back(f"/child/{username}", err=f"{policy.WEEKDAYS[wd]}: укажите оба времени")
-            rules.append((wd, lim, a, b))
+            rules.append((wd, lim, a, b, ba, bb))
     except ValueError:
         return back(f"/child/{username}", err="Неверное число или время")
     async with request.app.state.pool.acquire() as conn:
         await child_access(conn, u, username)
         async with conn.transaction():
-            for wd, lim, a, b in rules:
-                await db.set_rule(conn, username, wd, lim, a, b)
+            for wd, lim, a, b, ba, bb in rules:
+                await db.set_rule(conn, username, wd, lim, a, b, ba, bb)
     return back(f"/child/{username}", ok="Правила сохранены")
 
 
@@ -546,6 +605,10 @@ async def family_save(request: Request, family_id: int):
         if section == "name":
             await conn.execute("UPDATE ft_families SET name = $2 WHERE id = $1", family_id,
                                str(form.get("name", "")).strip()[:100] or fam["name"])
+        elif section == "kind":
+            kind = str(form.get("kind", "family"))
+            await conn.execute("UPDATE ft_families SET kind = $2 WHERE id = $1", family_id,
+                               kind if kind in policy.FAMILY_KINDS else "family")
         elif section == "messages":
             msgs = {k: str(form.get(k, "")).strip()[:1000] for k in policy.FAMILY_MESSAGE_KEYS}
             await conn.execute("UPDATE ft_families SET messages = $2 WHERE id = $1", family_id,
@@ -586,7 +649,11 @@ async def settings_page(request: Request):
     u = need_admin(request)
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
-    return page(request, "settings.html", u, s=s,
+        phones = await conn.fetch(
+            """SELECT device, net, max(at) AS at, count(*) AS n, min(accuracy) AS best
+               FROM ft_phone_fixes WHERE at > now() - interval '1 day'
+               GROUP BY device, net ORDER BY max(at) DESC LIMIT 20""")
+    return page(request, "settings.html", u, s=s, phones=phones,
                 ip_locations=locator.format_ip_locations(s["ip_locations"]))
 
 
@@ -604,11 +671,25 @@ async def settings_save(request: Request):
     known, errors = locator.parse_ip_locations(str(form.get("ip_locations", "")))
     if errors:
         return back("/settings", err="Известные адреса, не разобрано: " + "; ".join(errors[:3]))
+    try:
+        phone_minutes = max(1, min(240, int(form.get("phone_minutes") or 30)))
+        phone_acc = max(5, min(1000, int(form.get("phone_max_accuracy") or 100)))
+    except ValueError:
+        return back("/settings", err="Неверное число")
+    phone_ids = [x for x in re.split(r"[\s,;]+", str(form.get("phone_ids", "")).strip()) if x][:100]
+    terms = str(form.get("portal_terms", "family"))
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
+        await db.set_setting(conn, "jitter", form.get("jitter") == "1", u.username)
+        await db.set_setting(conn, "phone_ids", phone_ids, u.username)
+        await db.set_setting(conn, "phone_minutes", phone_minutes, u.username)
+        await db.set_setting(conn, "phone_max_accuracy", phone_acc, u.username)
+        await db.set_setting(conn, "portal_terms",
+                             terms if terms in policy.FAMILY_KINDS else "family", u.username)
         await db.set_setting(conn, "ip_locations", known[:500], u.username)
         await db.set_setting(conn, "location", loc, u.username)
         await db.set_setting(conn, "messages", {**s["messages"], "lost": lost}, u.username)
+    request.app.state.terms_cache["at"] = -1e9
     return back("/settings", ok="Сохранено. Компьютеры получат изменения в течение минуты")
 
 

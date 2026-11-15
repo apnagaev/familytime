@@ -1,5 +1,6 @@
 {% macro status_pill(st) -%}
-  {%- if st.mode == 'restricted' and st.reason == 'window' -%}<span class="pill warn">только учёба: вне свободного времени</span>
+  {%- if st.mode == 'blocked' -%}<span class="pill bad">компьютер заблокирован</span>
+  {%- elif st.mode == 'restricted' and st.reason == 'window' -%}<span class="pill warn">только учёба: вне свободного времени</span>
   {%- elif st.mode == 'restricted' -%}<span class="pill bad">время закончилось, только учёба</span>
   {%- elif st.limit_seconds is none -%}<span class="pill">без лимита</span>
   {%- else -%}<span class="pill">можно</span>{%- endif -%}

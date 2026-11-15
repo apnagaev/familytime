@@ -75,13 +75,21 @@ def _t(v: str | None) -> time | None:
     return time(int(h), int(m))
 
 
-def in_window(rule: dict, t: time) -> bool:
-    a, b = _t(rule.get("from")), _t(rule.get("to"))
+def _between(a: time | None, b: time | None, t: time) -> bool | None:
     if a is None or b is None or a == b:
-        return True
+        return None
     if a < b:
         return a <= t < b
     return t >= a or t < b
+
+
+def in_window(rule: dict, t: time) -> bool:
+    r = _between(_t(rule.get("from")), _t(rule.get("to")), t)
+    return True if r is None else r
+
+
+def in_block(rule: dict, t: time) -> bool:
+    return bool(_between(_t(rule.get("block_from")), _t(rule.get("block_to")), t))
 
 
 def fmt_minutes(seconds) -> str:
@@ -111,7 +119,9 @@ def evaluate(policy: dict, now_local: datetime, pending_counted_today: int) -> d
         limit = None if lim is None else int(lim) * 60
         counted = pending_counted_today
     remaining = None if limit is None else max(0, limit - counted)
-    if not in_window(rule, now_local.time()):
+    if in_block(rule, now_local.time()):
+        mode, reason = "blocked", "block"
+    elif not in_window(rule, now_local.time()):
         mode, reason = "restricted", "window"
     elif remaining is not None and remaining <= 0:
         mode, reason = "restricted", "limit"

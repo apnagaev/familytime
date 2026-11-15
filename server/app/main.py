@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__, agent_api, auth, db, lists, portal
+from . import __version__, agent_api, auth, db, lists, phones, portal
 from .config import Config
 from .telegram import Telegram
 
@@ -47,8 +48,28 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app = FastAPI(title="FamilyTime", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(agent_api.router)
+    app.include_router(phones.router)
     app.include_router(portal.router)
     app.mount("/static", StaticFiles(directory=str(Path(__file__).with_name("static"))), name="static")
+
+    terms_cache = {"at": -1e9, "value": "family"}
+    app.state.terms_cache = terms_cache          # сбрасывается при сохранении настроек
+
+    @app.middleware("http")
+    async def portal_terms(request: Request, call_next):
+        """Общая настройка «семья/компания» для страниц портала (кеш 30 с)."""
+        if not request.url.path.startswith(("/api/", "/osmand", "/static", "/health")):
+            now = time.monotonic()
+            if now - terms_cache["at"] > 30:
+                try:
+                    async with request.app.state.pool.acquire() as conn:
+                        v = await conn.fetchval(
+                            "SELECT value FROM ft_settings WHERE key = 'portal_terms'")
+                    terms_cache.update(at=now, value=v if v in ("family", "company") else "family")
+                except Exception:  # noqa: BLE001 — слова не важнее страницы
+                    pass
+            request.state.portal_terms = terms_cache["value"]
+        return await call_next(request)
 
     @app.exception_handler(portal.LoginRequired)
     async def _login(request: Request, exc: portal.LoginRequired):

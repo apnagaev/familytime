@@ -4,14 +4,17 @@
   1. известный адрес — таблица «IP или подсеть → координаты» из общих настроек, без запросов;
   2. те же точки Wi-Fi и тот же IP, что в прошлый раз — прошлое место, без запроса;
   3. Wi-Fi (+ IP) → Яндекс Локатор;
-  4. без Wi-Fi: место по внешнему IP — из кеша (неделя), иначе Яндекс Локатор по IP,
-     иначе служба GeoIP (GEOIP_URL); точность — город.
+  4. без Wi-Fi: место, которое агент узнал вместе с внешним адресом (ip-api.com), иначе
+     по внешнему IP на сервере — из кеша (неделя), Яндекс Локатор по IP, служба GEOIP_URL;
+     точность — город.
+Раньше всех — свежая точка GPS телефона (Traccar Client через FamilyTime) из той же сети.
 """
 from __future__ import annotations
 
 import hashlib
 import ipaddress
 import logging
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -179,23 +182,71 @@ async def geoip(http: httpx.AsyncClient, cfg, ip: str) -> Fix | None:
     return Fix(float(lat), float(lon), GEOIP_ACCURACY, "geoip", str(d.get("city") or "")[:60])
 
 
-async def resolve(http, cfg, conn, settings: dict, dev, wifi, ip: str) -> tuple[Fix | None, str]:
-    """Место компьютера (см. порядок в начале файла) и подпись Wi-Fi для следующего раза."""
+def net_key(ip: str) -> str:
+    """Ключ сети для сопоставления с телефонами: публичный адрес целиком, внутренний IPv4 —
+    его /24 (дома телефон и компьютер получают разные внутренние адреса одной сети)."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    if public_ip(ip):
+        return str(a)
+    if a.version == 4 and a.is_private:
+        return str(ipaddress.ip_network(f"{a}/24", strict=False))
+    return ""
+
+
+async def phone_fix(conn, settings: dict, ips: list[str]) -> Fix | None:
+    """Свежая точная точка GPS телефона из той же сети (Traccar Client через FamilyTime)."""
+    keys = sorted({k for k in (net_key(i) for i in ips if i) if k})
+    if not keys:
+        return None
+    minutes = int(settings.get("phone_minutes") or 30)
+    row = await conn.fetchrow(
+        """SELECT lat, lon, accuracy, device FROM ft_phone_fixes
+           WHERE net = ANY($1::text[]) AND at > now() - make_interval(mins => $2)
+             AND accuracy <= $3
+           ORDER BY accuracy, at DESC LIMIT 1""",
+        keys, minutes, float(settings.get("phone_max_accuracy") or 100))
+    if not row:
+        return None
+    return Fix(row["lat"], row["lon"], max(row["accuracy"], 5.0), "phone-gps",
+               f"по телефону {row['device']}"[:60], True)
+
+
+async def resolve(http, cfg, conn, settings: dict, dev, wifi, ip: str, ext_ip: str = "",
+                  ext_geo=None) -> tuple[Fix | None, str]:
+    """Место компьютера и подпись Wi-Fi для следующего раза.
+
+    ip — адрес, с которого агент пришёл на сервер (дома — внутренний), ext_ip — внешний адрес,
+    который агент узнал сам, ext_geo — место по нему от той же службы.
+    Порядок: свежий GPS телефона из той же сети → известный адрес → Wi-Fi → место по IP.
+    """
     sig = wifi_signature(wifi)
-    known = match_known(settings.get("ip_locations", []), ip)
-    if known:
-        return known, sig
+    ext_ip = public_ip(ext_ip)
+    fix = await phone_fix(conn, settings, [ext_ip, ip])
+    if fix:
+        return fix, sig
+    for addr in (ip, ext_ip):
+        known = match_known(settings.get("ip_locations", []), addr) if addr else None
+        if known:
+            return known, sig
     now = datetime.now(timezone.utc)
+    seen_ip = ext_ip or ip
     if sig:
-        if (dev["last_wifi_sig"] == sig and dev["last_ip"] == ip and dev["last_fix_at"]
-                and now - dev["last_fix_at"] < WIFI_REUSE
+        if (dev["last_wifi_sig"] == sig and (dev["ext_ip"] or dev["last_ip"]) == seen_ip
+                and dev["last_fix_at"] and now - dev["last_fix_at"] < WIFI_REUSE
                 and dev["last_fix_source"] == "yandex-wifi"):
             return Fix(dev["last_lat"], dev["last_lon"], dev["last_accuracy"] or 0,
                        "yandex-wifi", cached=True), sig
-        fix = await locate(http, cfg, wifi, ip)
+        fix = await locate(http, cfg, wifi, ext_ip or ip)
         if fix:
             return fix, sig
-    pip = public_ip(ip)
+    # без Wi-Fi: место, которое агент уже узнал вместе с внешним адресом, — без запросов
+    if ext_geo is not None and ext_geo.lat is not None and ext_geo.lon is not None:
+        return Fix(float(ext_geo.lat), float(ext_geo.lon), GEOIP_ACCURACY, "geoip",
+                   (ext_geo.city or "")[:60], True), sig
+    pip = ext_ip or public_ip(ip)
     if not pip:
         return None, sig
     row = await conn.fetchrow("SELECT * FROM ft_geoip WHERE ip = $1", pip)
@@ -215,19 +266,38 @@ async def resolve(http, cfg, conn, settings: dict, dev, wifi, ip: str) -> tuple[
     return fix, sig
 
 
-def osmand_params(dev, fix: Fix, body, ip: str, now: datetime) -> dict:
+JITTER_MAX = 2000.0       # м: дальше не разбрасываем, даже если точность хуже (место по IP)
+
+
+def jitter(lat: float, lon: float, radius: float, rnd: random.Random | None = None) -> tuple[float, float]:
+    """Случайная точка внутри круга радиусом radius метров, равномерно по площади,
+    чтобы точки одного места не ложились друг на друга."""
+    radius = min(max(radius, 0.0), JITTER_MAX)
+    if radius <= 0:
+        return lat, lon
+    rnd = rnd or random
+    r = radius * math.sqrt(rnd.random())
+    t = rnd.random() * 2 * math.pi
+    dlat = r * math.cos(t) / 111_320
+    dlon = r * math.sin(t) / (111_320 * max(math.cos(math.radians(lat)), 0.01))
+    return lat + dlat, lon + dlon
+
+
+def osmand_params(dev, fix: Fix, body, ip: str, now: datetime, spread: bool = True) -> dict:
     """Параметры OsmAnd (https://www.traccar.org/osmand/).
 
     Имена wifi и cell у Traccar зарезервированы под формат «MAC,сигнал» — число точек идёт
-    как wifiCount. ip не передаётся: его дописывает прокси перед Traccar; адрес, с которого
-    агент пришёл на портал, — extip. status — стандартный числовой атрибут Traccar, поэтому
-    состояние сеанса — session.
+    как wifiCount. ip не передаётся: его дописывает прокси перед Traccar. extip — внешний
+    адрес, который агент узнал сам (ip-api.com), localIP — адрес, с которого агент пришёл
+    на сервер. status — стандартный числовой атрибут Traccar, поэтому состояние сеанса — session.
+    spread — разброс точки в пределах точности.
     """
+    lat, lon = jitter(fix.lat, fix.lon, fix.accuracy) if spread else (fix.lat, fix.lon)
     p = {
         "id": dev["hostname"],
         "timestamp": int(now.timestamp()),
-        "lat": f"{fix.lat:.6f}",
-        "lon": f"{fix.lon:.6f}",
+        "lat": f"{lat:.6f}",
+        "lon": f"{lon:.6f}",
         "accuracy": f"{fix.accuracy:.0f}",
         "ignition": "true" if body.session == "active" else "false",
         "source": fix.source,
@@ -237,8 +307,11 @@ def osmand_params(dev, fix: Fix, body, ip: str, now: datetime) -> dict:
     }
     if fix.place:
         p["place"] = fix.place
+    ext = public_ip(body.ext_ip) or public_ip(ip)
+    if ext:
+        p["extip"] = ext
     if ip:
-        p["extip"] = ip
+        p["localIP"] = ip
     if body.battery is not None:
         p["batt"] = body.battery
     if body.on_ac is not None:
@@ -247,17 +320,16 @@ def osmand_params(dev, fix: Fix, body, ip: str, now: datetime) -> dict:
         p["username"] = body.user.lower()
     if body.ssid:
         p["ssid"] = body.ssid
-    if body.local_ip:
-        p["localIP"] = body.local_ip
     if dev["lost"]:
         p["alarm"] = "lost"
     return p
 
 
-async def send_osmand(http, cfg, dev, fix: Fix, body, ip: str, now: datetime) -> bool:
+async def send_osmand(http, cfg, dev, fix: Fix, body, ip: str, now: datetime,
+                      spread: bool = True) -> bool:
     try:
-        r = await http.get(cfg.traccar_osmand_url + "/", params=osmand_params(dev, fix, body, ip, now),
-                           timeout=10)
+        r = await http.get(cfg.traccar_osmand_url + "/",
+                           params=osmand_params(dev, fix, body, ip, now, spread), timeout=10)
         if r.status_code >= 400:
             log.warning("traccar osmand: HTTP %s", r.status_code)
         return r.status_code < 400

@@ -23,6 +23,7 @@ HEARTBEAT = 60
 CLOSE_GRACE = 10          # с: после WM_CLOSE программа закрывается принудительно
 HELPER_MISSING_LOGOFF = 90
 HELPER_RESTART = 60       # с: помощник молчит дольше — перезапуск
+LOCK_GRACE = 4            # с: помощник не заблокировал экран — блокирует служба (отключает сеанс)
 POLICY_LIMIT = 1000       # столько адресов принимают политики браузеров
 BLOCK_REPEAT = 3          # с: как часто повторять закрытие вкладки с запрещённым сайтом
 LIST_KEYS = ("edu_apps", "edu_domains", "blocked_apps", "blocked_domains", "restricted_domains")
@@ -70,6 +71,10 @@ class Engine:
         self.close_browsers: dict | None = None
         self.last_restricted_toast = -1e9
         self.last_logoff = -1e9
+        self.unlocked_since: dict[int, float] = {}
+        self.last_service_lock = -1e9
+        self.notice_state: str | None = "?"      # что сейчас на экране входа (неизвестно)
+        self.ext: dict = {}                      # внешний адрес: {"at", "ip", "geo"}
         self.want_wifi = False
         self.last_current: dict = {}
         self.block_sent: dict[str, float] = {}
@@ -231,13 +236,13 @@ class Engine:
         dev = self.dev
         directive = {"mode": "none", "close": [], "close_browsers": False, "lost": None,
                      "want_wifi": self.want_wifi, "remaining": None, "notify": None}
+        lost_lock = bool(dev["lost"].get("on") and dev["lost"].get("lock"))
         if dev["lost"].get("on"):
-            directive["lost"] = {"message": dev["lost"].get("message", ""),
-                                 "lock": dev["lost"].get("lock", False)}
-            if dev["lost"].get("lock") and sess and mono - self.last_logoff > 20:
-                self.last_logoff = mono
-                log.info("компьютер потерян, вход заблокирован: завершаю сеанс %s", sess.id)
-                self.p.logoff(sess.id)
+            directive["lost"] = {"message": dev["lost"].get("message", ""), "lock": lost_lock}
+        # сообщение на экране входа — только пока компьютер потерян с запретом входа
+        self.set_logon_notice(dev["lost"].get("message", "") if lost_lock else None)
+        if lost_lock and sess:
+            self.lock(sess, mono, directive, "компьютер потерян")
 
         user = sess.user if sess else ""
         pol = self.st.users.get(user) if user else None
@@ -249,6 +254,8 @@ class Engine:
             # не ребёнок (или компьютер «только локация») — снять всё, что агент мог оставить:
             # запреты сайтов, «только учёба», отключённые инкогнито и гостевой режим
             self.release_all(sess)
+        if sess and not directive.get("lock"):
+            self.unlocked_since.pop(sess.id, None)      # блокировать больше не нужно
         if self.notify and self.notify["expires"] > wall:
             directive["notify"] = self.notify
         if self.close_browsers and self.close_browsers["expires"] > wall \
@@ -265,6 +272,33 @@ class Engine:
                 self.heartbeat(sess, report, wall)      # догоняем накопленное без связи
         if wall - self.st.last_location >= dev["location_interval"]:
             self.location(sess, report, wall)
+
+    # ---------- блокировка ----------
+
+    def lock(self, sess: Session, mono: float, directive: dict, why: str) -> None:
+        """Заблокировать экран сразу (Win+L делает помощник) и держать заблокированным:
+        если сеанс разблокирован дольше LOCK_GRACE, служба отключает его сама."""
+        directive["lock"] = True
+        if sess.locked:
+            self.unlocked_since.pop(sess.id, None)
+            return
+        first = self.unlocked_since.setdefault(sess.id, mono)
+        if mono - first >= LOCK_GRACE and mono - self.last_service_lock >= LOCK_GRACE:
+            self.last_service_lock = mono
+            log.info("%s: блокирую сеанс %s (%s)", sess.user, sess.id, why)
+            try:
+                self.p.lock_session(sess.id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("сеанс не заблокирован: %s", e)
+
+    def set_logon_notice(self, text: str | None) -> None:
+        if text == self.notice_state:
+            return
+        try:
+            self.p.set_logon_notice("Компьютер потерян" if text else None, text)
+            self.notice_state = text
+        except Exception as e:  # noqa: BLE001
+            log.warning("сообщение на экране входа: %s", e)
 
     # ---------- учёт ----------
 
@@ -334,6 +368,13 @@ class Engine:
             # дали ещё времени — предупреждения снова сработают
             w["levels"] = [m for m in w["levels"] if ev["remaining"] <= m * 60]
 
+        if ev["mode"] == "blocked":
+            if prev != "blocked":
+                log.info("%s: время блокировки — компьютер заблокирован", user)
+            directive["block"] = {"message": msgs.get("block", "")}
+            self.set_browsers(sess, True, dev)
+            self.lock(sess, mono, directive, "время блокировки")
+            return
         if ev["mode"] == "restricted" and prev != "restricted":
             text = msgs.get(ev["reason"] or "limit", "")
             self._notify(ev["reason"] or "limit", text, wall, ttl=600, modal=True)
@@ -371,8 +412,9 @@ class Engine:
                         self.p.kill(pid)
                     if mono - self.last_restricted_toast > 60:
                         self.last_restricted_toast = mono
-                        self._notify("info", "Сейчас работают только учебные программы и сайты.",
-                                     wall, ttl=15)
+                        self._notify("info", msgs.get(
+                            "restricted", "Сейчас работают только учебные программы и сайты."),
+                            wall, ttl=15)
                 self.close_seen = {k: v for k, v in self.close_seen.items() if k in alive}
             elif mono - self.helper_seen.get(sess.id, mono) > HELPER_MISSING_LOGOFF \
                     and not sess.locked and mono - self.last_logoff > 60:
@@ -499,6 +541,29 @@ class Engine:
         self.sync_lists()
         return True
 
+    def external_ip(self, wall: float) -> dict:
+        """Внешний адрес компьютера и место по нему — у службы вроде ip-api.com, напрямую
+        с компьютера. Не чаще раза в 5 минут; не вышло — последний известный."""
+        url = self.dev.get("ext_ip_url")
+        if not url:
+            return {}
+        if self.ext and wall - self.ext.get("at", 0) < 300:
+            return self.ext
+        try:
+            d = self.p.http_json(url)
+        except Exception as e:  # noqa: BLE001
+            log.info("внешний адрес не получен: %s", e)
+            return self.ext
+        ip = str(d.get("query") or d.get("ip") or "").strip()
+        if not ip or d.get("status") == "fail":
+            return self.ext
+        geo = None
+        lat, lon = d.get("lat", d.get("latitude")), d.get("lon", d.get("longitude"))
+        if lat not in (None, "") and lon not in (None, ""):
+            geo = {"lat": float(lat), "lon": float(lon), "city": str(d.get("city") or "")[:60]}
+        self.ext = {"at": wall, "ip": ip[:64], "geo": geo}
+        return self.ext
+
     def location(self, sess: Session | None, report: dict | None, wall: float) -> None:
         if not self.st.token:
             return
@@ -509,9 +574,11 @@ class Engine:
             rw = (report or {}).get("wifi")
             wifi = rw["aps"] if rw and wall - rw.get("at", 0) < 300 else []
         battery, on_ac = self.p.battery()
+        ext = self.external_ip(wall)
         body = {"wifi": wifi[:100], "battery": battery, "on_ac": on_ac,
                 "session": sess.state if sess else "none", "user": sess.user if sess else "",
-                "local_ip": self.p.local_ip(), "reason": "lost" if self.dev["lost"].get("on") else "timer"}
+                "ext_ip": ext.get("ip", ""), "ext_geo": ext.get("geo"),
+                "reason": "lost" if self.dev["lost"].get("on") else "timer"}
         try:
             r = self.client.post("/api/agent/location", body, self.st.token)
             self.st.last_location = wall

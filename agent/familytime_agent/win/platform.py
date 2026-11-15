@@ -192,6 +192,62 @@ class WinPlatform:
         finally:
             token.Close()
 
+    def lock_session(self, sid: int) -> None:
+        """Заблокировать сеанс без помощника: отключение сеанса консоли показывает экран
+        входа, программы пользователя продолжают работать (как после Win+L)."""
+        win32ts.WTSDisconnectSession(win32ts.WTS_CURRENT_SERVER_HANDLE, sid, False)
+
+    def set_logon_notice(self, caption: str | None, text: str | None) -> None:
+        """Сообщение на экране входа (до ввода пароля). Прежнее значение, если было,
+        сохраняется и возвращается, когда сообщение снимается."""
+        pol = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+        saved = r"SOFTWARE\FamilyTime\SavedLogonNotice"
+        names = ("legalnoticecaption", "legalnoticetext")
+        with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, pol, 0, winreg.KEY_ALL_ACCESS) as k:
+            if caption and text:
+                try:
+                    winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, saved).Close()
+                except OSError:                       # сохраняем чужое сообщение один раз
+                    with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, saved, 0,
+                                            winreg.KEY_ALL_ACCESS) as sk:
+                        for n in names:
+                            try:
+                                winreg.SetValueEx(sk, n, 0, winreg.REG_SZ,
+                                                  winreg.QueryValueEx(k, n)[0])
+                            except OSError:
+                                pass
+                winreg.SetValueEx(k, names[0], 0, winreg.REG_SZ, caption)
+                winreg.SetValueEx(k, names[1], 0, winreg.REG_SZ, text)
+                return
+            try:
+                sk = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, saved)
+            except OSError:
+                sk = None
+            if sk is None:
+                # сохранённого нет: если сообщение наше — убрать, чужое не трогаем
+                try:
+                    if winreg.QueryValueEx(k, names[0])[0] == "Компьютер потерян":
+                        for n in names:
+                            winreg.SetValueEx(k, n, 0, winreg.REG_SZ, "")
+                except OSError:
+                    pass
+                return
+            with sk:
+                for n in names:
+                    try:
+                        v = winreg.QueryValueEx(sk, n)[0]
+                    except OSError:
+                        v = ""
+                    winreg.SetValueEx(k, n, 0, winreg.REG_SZ, v)
+            winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, saved)
+
+    def http_json(self, url: str) -> dict:
+        import json
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "familytime-agent"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read().decode("utf-8") or "{}")
+
     def logoff(self, sid: int) -> None:
         try:
             win32ts.WTSLogoffSession(win32ts.WTS_CURRENT_SERVER_HANDLE, sid, False)

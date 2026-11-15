@@ -37,6 +37,12 @@ class Config:
     yandex_locator_url: str = "https://locator.api.maps.yandex.ru/v1/locate"
     # место по IP, когда Wi-Fi нет; {ip} подставляется; пусто — не использовать
     geoip_url: str = "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"
+    # где агент узнаёт свой внешний адрес (и место по нему); пусто — не узнавать
+    ext_ip_url: str = "http://ip-api.com/json/?fields=status,query,lat,lon,city"
+    # пересылать точки Traccar Client, принятые на /osmand, сюда (по умолчанию TRACCAR_OSMAND_URL)
+    osmand_forward_url: str = ""
+    # имена сайта портала, на которых показывать «компанию» вместо «семьи»
+    company_hosts: list[str] = field(default_factory=list)
     # Traccar
     traccar_osmand_url: str = ""          # http://10.0.0.1:15055
     traccar_api_url: str = ""             # http://10.0.0.1:82/api
@@ -75,6 +81,10 @@ class Config:
                 "YANDEX_LOCATOR_URL", "https://locator.api.maps.yandex.ru/v1/locate"),
             geoip_url=os.environ.get(
                 "GEOIP_URL", "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"),
+            ext_ip_url=os.environ.get(
+                "EXT_IP_URL", "http://ip-api.com/json/?fields=status,query,lat,lon,city"),
+            osmand_forward_url=os.environ.get("OSMAND_FORWARD_URL", "").rstrip("/"),
+            company_hosts=[h.lower() for h in _list("COMPANY_HOSTS")],
             traccar_osmand_url=os.environ.get("TRACCAR_OSMAND_URL", "").rstrip("/"),
             traccar_api_url=os.environ.get("TRACCAR_API_URL", "").rstrip("/"),
             traccar_token=os.environ.get("TRACCAR_TOKEN", ""),

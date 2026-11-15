@@ -14,6 +14,30 @@
     <label class="block">Известные адреса</label>
     <textarea name="ip_locations" style="min-height: 110px; font-family: monospace" placeholder="203.0.113.5 55.7558 37.6173 50 Дом&#10;10.0.0.0/8 55.7558 37.6173 50 Дом, локальная сеть">{{ ip_locations }}</textarea>
     <p class="hint">По строке: <code>IP-или-подсеть широта долгота [точность, м] [название]</code>. Если компьютер приходит на портал с такого адреса, место берётся отсюда, без запросов к Яндексу и GeoIP. Подходят и внутренние подсети: дома компьютеры обычно ходят на портал через локальную сеть. Из пересекающихся подсетей выбирается самая узкая.</p>
+    <label class="block"><input type="checkbox" name="jitter" value="1" {{ 'checked' if s.jitter }}> Разбрасывать точки в пределах точности</label>
+    <p class="hint">Точка, которую FamilyTime отправляет в Traccar, ставится в случайное место круга с радиусом её точности (не дальше 2 км), чтобы точки одного места не ложились друг на друга. Настоящие координаты хранятся в портале.</p>
+
+    <h2 style="margin-top: 18px">Телефоны с Traccar Client</h2>
+    <p class="hint">Телефоны, которые шлют точки на <code>{{ cfg.public_url }}/osmand</code>, FamilyTime пересылает в Traccar как есть. Если телефон есть в этом списке, его точка запоминается вместе с сетью, из которой пришла, и компьютер из той же сети получает это место — точнее, чем известный адрес или Wi-Fi, и без запросов к API. Сеть — внешний адрес, а внутри дома — подсеть /24.</p>
+    <label class="block small">Идентификаторы телефонов (как в Traccar Client), по одному на строке</label>
+    <textarea name="phone_ids" style="min-height: 70px; font-family: monospace">{{ s.phone_ids|join('\n') }}</textarea>
+    <div class="row">
+      <label>Точка свежая, мин <input type="number" name="phone_minutes" value="{{ s.phone_minutes }}" min="1" max="240"></label>
+      <label>Не точнее, м <input type="number" name="phone_max_accuracy" value="{{ s.phone_max_accuracy }}" min="5" max="1000"></label>
+    </div>
+    {% if phones %}
+    <table class="small" style="margin-top: 8px">
+      <tr><th>Телефон</th><th>Сеть</th><th class="num">Точек за сутки</th><th class="num">Лучшая, м</th><th>Последняя</th></tr>
+      {% for p in phones %}<tr><td>{{ p.device }}</td><td>{{ p.net }}</td><td class="num">{{ p.n }}</td><td class="num">{{ p.best|int }}</td><td>{{ p.at.astimezone(cfg.tz).strftime('%d.%m %H:%M') }}</td></tr>{% endfor %}
+    </table>
+    {% endif %}
+
+    <h2 style="margin-top: 18px">Слова на страницах портала</h2>
+    <div class="row">
+      <label><input type="radio" name="portal_terms" value="family" {{ 'checked' if s.portal_terms != 'company' }}> семья: родители, дети, учёба</label>
+      <label><input type="radio" name="portal_terms" value="company" {{ 'checked' if s.portal_terms == 'company' }}> компания: руководители, сотрудники, работа</label>
+    </div>
+    <p class="hint">{% if cfg.company_hosts %}Сейчас слова задаёт имя сайта: «компания» на {{ cfg.company_hosts|join(', ') }}, «семья» на остальных; этот переключатель не действует.{% else %}Можно задавать и по имени сайта: переменная <code>familytime_company_hosts</code> — тогда один сервер показывает «семью» на одном адресе и «компанию» на другом.{% endif %}</p>
     <div class="row" style="margin-top: 10px"><button>Сохранить</button></div>
   </form>
   <p class="hint">Как определяется место: известный адрес → Wi-Fi вокруг (Яндекс Локатор; пока точки и IP те же, прошлое место используется до суток без нового запроса) → без Wi-Fi по внешнему IP, с точностью до города (запоминается на неделю). Действует на все компьютеры всех семей. Сайты, программы, подписки, простой и предупреждения настраиваются на странице каждого ребёнка, тексты сообщений и чаты Telegram — на странице семьи.</p>

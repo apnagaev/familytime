@@ -148,7 +148,8 @@ async def add_child(conn, username: str, display_name: str, family_id: int | Non
             username, display_name.strip() or username, family_id, policy.child_settings({}))
         for wd, (lim, a, b) in enumerate(policy.DEFAULT_RULES):
             await conn.execute(
-                "INSERT INTO ft_rules VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                "INSERT INTO ft_rules (username, weekday, limit_minutes, window_from, window_to) "
+                "VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
                 username, wd, lim, a, b)
 
 
@@ -159,17 +160,21 @@ async def get_rules(conn, username: str) -> dict[int, policy.Rule]:
         lim, a, b = policy.DEFAULT_RULES[wd]
         out[wd] = policy.Rule(lim, a, b)
     for r in rows:
-        out[r["weekday"]] = policy.Rule(r["limit_minutes"], r["window_from"], r["window_to"])
+        out[r["weekday"]] = policy.Rule(r["limit_minutes"], r["window_from"], r["window_to"],
+                                        r["block_from"], r["block_to"])
     return out
 
 
 async def set_rule(conn, username: str, weekday: int, limit: int | None,
-                   a: time | None, b: time | None) -> None:
+                   a: time | None, b: time | None, block_a: time | None = None,
+                   block_b: time | None = None) -> None:
     await conn.execute(
-        """INSERT INTO ft_rules VALUES ($1, $2, $3, $4, $5)
+        """INSERT INTO ft_rules (username, weekday, limit_minutes, window_from, window_to,
+                                 block_from, block_to) VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT (username, weekday) DO UPDATE SET limit_minutes = EXCLUDED.limit_minutes,
-           window_from = EXCLUDED.window_from, window_to = EXCLUDED.window_to""",
-        username, weekday, limit, a, b)
+           window_from = EXCLUDED.window_from, window_to = EXCLUDED.window_to,
+           block_from = EXCLUDED.block_from, block_to = EXCLUDED.block_to""",
+        username, weekday, limit, a, b, block_a, block_b)
 
 
 async def bonus_minutes(conn, username: str, day: date) -> int:

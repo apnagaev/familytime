@@ -42,8 +42,10 @@ h2 { font-size: 18px; margin: 0 0 12px; }
 .meter > i { display: block; height: 100%; background: var(--accent); }
 .meter.warn > i { background: var(--warn); }
 .meter.bad > i { background: var(--bad); }
-.bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; margin-top: 8px; }
-.bars .b { flex: 1; display: flex; flex-direction: column-reverse; min-width: 6px; }
+.bars { display: flex; align-items: stretch; gap: 4px; height: 120px; margin-top: 8px; }
+/* высота столбца — вся высота графика, доли считаются от неё (без этого высота 0) */
+.bars .b { flex: 1; display: flex; flex-direction: column-reverse; min-width: 6px; height: 100%; }
+.bars .b i { flex: none; min-height: 0; }
 .bars .b i { display: block; }
 .bars .b .c { background: var(--accent); border-radius: 0 0 3px 3px; }
 .bars .b .f { background: var(--free); border-radius: 3px 3px 0 0; opacity: .8; }

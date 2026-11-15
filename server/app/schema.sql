@@ -168,3 +168,19 @@ CREATE TABLE IF NOT EXISTS ft_geoip (
 );
 ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS last_wifi_sig text NOT NULL DEFAULT '';
 ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS last_place text NOT NULL DEFAULT '';
+
+-- 1.3: блокировка по времени, тип семьи, точки телефонов (Traccar Client) по адресам
+ALTER TABLE ft_rules ADD COLUMN IF NOT EXISTS block_from time;
+ALTER TABLE ft_rules ADD COLUMN IF NOT EXISTS block_to time;
+ALTER TABLE ft_families ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'family';
+CREATE TABLE IF NOT EXISTS ft_phone_fixes (
+    id       bigserial PRIMARY KEY,
+    net      text NOT NULL,              -- публичный IP или /24 внутренней сети телефона
+    device   text NOT NULL,
+    lat      double precision NOT NULL,
+    lon      double precision NOT NULL,
+    accuracy double precision NOT NULL,
+    at       timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ft_phone_fixes_net ON ft_phone_fixes (net, at);
+ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS ext_ip text NOT NULL DEFAULT '';

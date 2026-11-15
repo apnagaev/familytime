@@ -95,8 +95,16 @@ class WifiAP(BaseModel):
     rssi: int                               # дБм
 
 
+class ExtGeo(BaseModel):
+    lat: float | None = None
+    lon: float | None = None
+    city: str = ""
+
+
 class LocationIn(BaseModel):
     wifi: list[WifiAP] = Field(default_factory=list, max_length=100)
+    ext_ip: str = ""                        # внешний адрес, который агент узнал сам (ip-api.com)
+    ext_geo: ExtGeo | None = None           # место по этому адресу от той же службы
     ssid: str = ""
     battery: int | None = None
     on_ac: bool | None = None
@@ -160,6 +168,7 @@ def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_s
         "warn_minutes": [int(x) for x in cs["warn_minutes"]],
         "location_interval": max(60, int(interval) * 60),
         "portal_url": cfg.public_url,
+        "ext_ip_url": cfg.ext_ip_url,
         "lost": {
             "on": dev["lost"],
             "lock": dev["lost_lock"],
@@ -179,9 +188,13 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
         "used": policy.fmt_minutes(st["counted_seconds"]),
         "from": policy.fmt_time(rule.window_from),
         "to": policy.fmt_time(rule.window_to),
+        "block_from": policy.fmt_time(rule.block_from),
+        "block_to": policy.fmt_time(rule.block_to),
     }
-    fam = await conn.fetchval("SELECT messages FROM ft_families WHERE id = $1", child["family_id"])
-    msgs = policy.family_messages(fam)
+    fam = await conn.fetchrow("SELECT messages, kind FROM ft_families WHERE id = $1",
+                              child["family_id"])
+    msgs = policy.family_messages(fam["messages"] if fam else None,
+                                  fam["kind"] if fam else "family")
     cs = policy.child_settings(child["settings"])
     eff = await lists.effective(conn, child)
     return {
@@ -194,7 +207,8 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
         "counted_seconds": st["counted_seconds"],
         "remaining_seconds": st["remaining_seconds"],
         "window_change_in": st["window_change_in"],
-        "messages": {k: policy.render(msgs.get(k, ""), values) for k in ("warn", "limit", "window")},
+        "messages": {k: policy.render(msgs.get(k, ""), values)
+                     for k in ("warn", "limit", "window", "block", "restricted")},
         "lists_version": eff["version"],
         "restricted_kill": cs["restricted_kill"],
         "idle_minutes": int(cs["idle_minutes"]),
@@ -205,6 +219,8 @@ async def user_policy(conn, cfg, child, now_local: datetime) -> dict:
                 "limit": r.limit_minutes,
                 "from": policy.fmt_time(r.window_from) or None,
                 "to": policy.fmt_time(r.window_to) or None,
+                "block_from": policy.fmt_time(r.block_from) or None,
+                "block_to": policy.fmt_time(r.block_to) or None,
             } for wd, r in st["rules"].items()
         },
     }
@@ -377,19 +393,21 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
     async with request.app.state.pool.acquire() as conn:
         settings = await db.get_settings(conn)
         fix, sig = await locator.resolve(request.app.state.http, cfg, conn, settings, dev,
-                                         body.wifi, ip)
+                                         body.wifi, ip, body.ext_ip, body.ext_geo)
+        ext_ip = locator.public_ip(body.ext_ip) or locator.public_ip(ip)
         if fix:
             # повторно использованное место не продлевает свой срок: last_fix_at не трогаем
             await conn.execute(
                 """UPDATE ft_devices SET last_lat = $2, last_lon = $3, last_accuracy = $4,
                    last_fix_at = CASE WHEN $11 THEN last_fix_at ELSE $5 END,
                    last_fix_source = $6, battery = $7, on_ac = $8, last_wifi_sig = $9,
-                   last_place = $10, last_ip = $12 WHERE id = $1""",
+                   last_place = $10, last_ip = $12, ext_ip = $13 WHERE id = $1""",
                 dev["id"], fix.lat, fix.lon, fix.accuracy, now, fix.source, body.battery,
-                body.on_ac, sig, fix.place, fix.cached and fix.source == "yandex-wifi", ip)
+                body.on_ac, sig, fix.place, fix.cached and fix.source == "yandex-wifi", ip, ext_ip)
         else:
-            await conn.execute("UPDATE ft_devices SET battery = $2, on_ac = $3 WHERE id = $1",
-                               dev["id"], body.battery, body.on_ac)
+            await conn.execute(
+                "UPDATE ft_devices SET battery = $2, on_ac = $3, ext_ip = $4 WHERE id = $1",
+                dev["id"], body.battery, body.on_ac, ext_ip)
         sent = False
         if fix and cfg.traccar_osmand_url:
             if not dev["traccar_ok"]:
@@ -399,7 +417,8 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
                     await conn.execute("UPDATE ft_devices SET traccar_ok = true WHERE id = $1",
                                        dev["id"])
             sent = await locator.send_osmand(
-                request.app.state.http, cfg, dev, fix, body, ip, now)
+                request.app.state.http, cfg, dev, fix, body, ip, now,
+                spread=bool(settings.get("jitter", True)))
     loc = settings["location"]
     interval = loc["lost_interval_minutes"] if dev["lost"] else loc["interval_minutes"]
     return {

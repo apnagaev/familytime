@@ -19,17 +19,19 @@
   <form method="post" action="/child/{{ child.username }}/rules">
     <input type="hidden" name="csrf" value="{{ user.csrf }}">
     <div class="scroll"><table>
-      <tr><th>День</th><th>Лимит, мин</th><th>Свободное время с</th><th>до</th></tr>
+      <tr><th>День</th><th>Лимит, мин</th><th>Свободное время с</th><th>до</th><th>Блокировка с</th><th>до</th></tr>
       {% for wd in range(7) %}{% set r = st.rules[wd] %}
       <tr>
         <td>{{ WEEKDAYS[wd] }}</td>
         <td><input type="number" name="limit{{ wd }}" value="{{ r.limit_minutes if r.limit_minutes is not none else '' }}" min="0" max="1440" placeholder="∞"></td>
         <td><input type="time" name="from{{ wd }}" value="{{ fmt_time(r.window_from) }}"></td>
         <td><input type="time" name="to{{ wd }}" value="{{ fmt_time(r.window_to) }}"></td>
+        <td><input type="time" name="bfrom{{ wd }}" value="{{ fmt_time(r.block_from) }}"></td>
+        <td><input type="time" name="bto{{ wd }}" value="{{ fmt_time(r.block_to) }}"></td>
       </tr>
       {% endfor %}
     </table></div>
-    <p class="hint">Пустой лимит — без ограничения, 0 — только учёба. Вне свободного времени компьютер работает только для учёбы. Пустые «с/до» — без ограничения по часам; если «до» меньше «с», окно переходит через полночь.</p>
+    <p class="hint">Пустой лимит — без ограничения, 0 — только учёба. Вне свободного времени компьютер работает только для учёбы. Пустые «с/до» — без ограничения по часам; если «до» меньше «с», окно переходит через полночь. Блокировка — компьютером нельзя пользоваться совсем, даже для учёбы: экран блокируется сразу, вход снова блокируется (например, ночью с 22:30 до 7:00).</p>
     <button>Сохранить</button>
   </form>
 </div>

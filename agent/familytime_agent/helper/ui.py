@@ -16,7 +16,7 @@ class UI:
         self.root = root
         self.toast: tk.Toplevel | None = None
         self.modal: tk.Toplevel | None = None
-        self.lost: tk.Toplevel | None = None
+        self.overlays: dict[str, list] = {}
         base = tkfont.nametofont("TkDefaultFont").actual()["family"]
         self.f_text = (base, 12)
         self.f_title = (base, 14, "bold")
@@ -79,20 +79,49 @@ class UI:
         self._close("modal")
 
     def set_lost(self, message: str | None) -> None:
+        self.set_overlay("lost", message, "#7a1c16")
+
+    def set_overlay(self, kind: str, message: str | None, color: str) -> None:
+        """Сообщение поверх всего на каждом мониторе (экран «потерян», время блокировки).
+        Размеры мониторов — в настоящих пикселях: помощник объявляет себя DPI-aware,
+        иначе при масштабе 125–150 % окно покрывало только часть экрана."""
+        wins = self.overlays.get(kind)
         if not message:
-            self._close("lost")
+            for w, _ in wins or []:
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
+            self.overlays.pop(kind, None)
             return
-        if self.lost is None:
-            w = tk.Toplevel(self.root)
-            w.overrideredirect(True)
+        mons = monitors() or [(0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())]
+        if wins is None or len(wins) != len(mons):
+            self.set_overlay(kind, None, color)
+            wins = []
+            for x, y, w_, h_ in mons:
+                w = tk.Toplevel(self.root)
+                w.overrideredirect(True)
+                w.configure(bg=color)
+                w.geometry(f"{w_}x{h_}+{x}+{y}")
+                w.protocol("WM_DELETE_WINDOW", lambda: None)
+                lbl = tk.Label(w, text="", bg=color, fg="white", font=self.f_big,
+                               wraplength=int(w_ * 0.7), justify="center")
+                lbl.place(relx=0.5, rely=0.45, anchor="center")
+                wins.append((w, lbl))
+            self.overlays[kind] = wins
+        for w, lbl in wins:
+            lbl.configure(text=message)
             w.attributes("-topmost", True)
-            w.configure(bg="#7a1c16")
-            w.geometry(f"{w.winfo_screenwidth()}x{w.winfo_screenheight()}+0+0")
-            w.protocol("WM_DELETE_WINDOW", lambda: None)
-            self.lost_label = tk.Label(w, text="", bg="#7a1c16", fg="white", font=self.f_big,
-                                       wraplength=int(w.winfo_screenwidth() * 0.7), justify="center")
-            self.lost_label.place(relx=0.5, rely=0.45, anchor="center")
-            self.lost = w
-        self.lost_label.configure(text=message)
-        self.lost.lift()
-        self.lost.attributes("-topmost", True)
+            w.lift()
+
+
+def monitors() -> list[tuple[int, int, int, int]]:
+    """(x, y, ширина, высота) каждого монитора."""
+    try:
+        import win32api
+        out = []
+        for _h, _dc, (l, t, r, b) in win32api.EnumDisplayMonitors(None, None):
+            out.append((l, t, r - l, b - t))
+        return out
+    except Exception:  # noqa: BLE001
+        return []
