@@ -294,6 +294,33 @@ def test_base_url_by_host():
     assert cfg.base_url("kids.example.com") == "https://kids.example.com"
     assert cfg.base_url("evil.example.org") == "https://kids.example.com"
     assert cfg.company_url == "https://work.example.com"
+    from app.config import norm_host
+    for raw in ("https://Work.Example.com/", " work.example.com:443 ", '"work.example.com"',
+                "work.example.com.", "https://work.example.com/oidc/callback"):
+        assert norm_host(raw) == "work.example.com", raw
+    import os
+    os.environ["COMPANY_HOSTS"] = "https://Work.Example.com/, other.example.com"
+    try:
+        assert Config.from_env().company_hosts == ["work.example.com", "other.example.com"]
+    finally:
+        del os.environ["COMPANY_HOSTS"]
+
+
+def test_login_returns_to_company_host(env):
+    c, _ = env
+
+    async def meta():
+        return {"authorization_endpoint": "https://sso.example.com/auth"}
+    c.app.state.oidc.meta = meta
+    c.app.state.cfg.dev_login = False
+    c.cookies.clear()
+    for headers, want in (({"host": "work.example.com"}, "work.example.com"),
+                          ({"host": "WORK.example.com:443"}, "work.example.com"),
+                          ({"host": "backend:8000", "x-forwarded-host": "work.example.com"}, "work.example.com"),
+                          ({"host": "kids.example.com"}, "kids.example.com"),
+                          ({"host": "evil.example.org"}, "kids.example.com")):
+        r = c.get("/login", headers=headers, follow_redirects=False)
+        assert f"redirect_uri=https%3A%2F%2F{want}%2Foidc%2Fcallback" in r.headers["location"], headers
 
 
 
