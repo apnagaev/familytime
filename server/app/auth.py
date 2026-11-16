@@ -78,7 +78,10 @@ class OIDC:
 
 
 def base(request: Request) -> str:
-    return request.app.state.cfg.base_url(request.headers.get("host"))
+    """Адрес портала для возврата из Keycloak: имя сайта, на который пришёл запрос
+    (X-Forwarded-Host от прокси, иначе Host), если оно в COMPANY_HOSTS, иначе PUBLIC_URL."""
+    h = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    return request.app.state.cfg.base_url(h.split(",")[0])
 
 
 def _serializer(cfg, salt: str) -> URLSafeTimedSerializer:
@@ -144,6 +147,9 @@ async def login_redirect(request: Request, next_url: str = "/") -> RedirectRespo
     cfg = request.app.state.cfg
     oidc: OIDC = request.app.state.oidc
     m = await oidc.meta()
+    log.info("вход: Host=%r X-Forwarded-Host=%r → возврат на %s (COMPANY_HOSTS=%s)",
+             request.headers.get("host"), request.headers.get("x-forwarded-host"), base(request),
+             ",".join(cfg.company_hosts) or "—")
     state = secrets.token_urlsafe(24)
     nonce = secrets.token_urlsafe(24)
     verifier = secrets.token_urlsafe(48)

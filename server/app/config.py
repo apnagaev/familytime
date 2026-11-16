@@ -84,7 +84,7 @@ class Config:
             ext_ip_url=os.environ.get(
                 "EXT_IP_URL", "http://ip-api.com/json/?fields=status,query,lat,lon,city"),
             osmand_forward_url=os.environ.get("OSMAND_FORWARD_URL", "").rstrip("/"),
-            company_hosts=[h.lower() for h in _list("COMPANY_HOSTS")],
+            company_hosts=[h for h in (norm_host(x) for x in _list("COMPANY_HOSTS")) if h],
             traccar_osmand_url=os.environ.get("TRACCAR_OSMAND_URL", "").rstrip("/"),
             traccar_api_url=os.environ.get("TRACCAR_API_URL", "").rstrip("/"),
             traccar_token=os.environ.get("TRACCAR_TOKEN", ""),
@@ -99,7 +99,7 @@ class Config:
 
     def base_url(self, host: str | None = None) -> str:
         """Адрес портала для запроса: сайт компании из COMPANY_HOSTS — он сам, иначе PUBLIC_URL."""
-        h = (host or "").split(":")[0].lower()
+        h = norm_host(host or "")
         if h and h in self.company_hosts:
             return "https://" + h
         return self.public_url
@@ -116,3 +116,15 @@ class Config:
         if not self.dev_login and not (self.oidc_issuer and self.oidc_client_id):
             problems.append("OIDC_ISSUER/OIDC_CLIENT_ID")
         return problems
+
+
+def norm_host(value: str) -> str:
+    """Имя сайта из того, как его записали: «https://Work.Example.com/», «work.example.com:443»,
+    «work.example.com.» → «work.example.com». Пробелы и кавычки по краям отбрасываются."""
+    v = (value or "").strip().strip("'\"").strip().lower()
+    if "://" in v:
+        v = v.split("://", 1)[1]
+    v = v.split("/", 1)[0].split("?", 1)[0]
+    if v.startswith("[") or v.count(":") == 1:          # порт; IPv6 в квадратных скобках не трогаем
+        v = v.rsplit(":", 1)[0] if not v.startswith("[") else v
+    return v.rstrip(".")

@@ -36,7 +36,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         app.state.tg = Telegram(cfg, app.state.http, app.state.pool)
         task = asyncio.create_task(app.state.tg.run())
         lists_task = asyncio.create_task(lists.updater(app.state.pool, app.state.http))
-        log.info("familytime %s запущен", __version__)
+        log.info("familytime %s запущен: PUBLIC_URL=%s, COMPANY_HOSTS=%s", __version__,
+                 cfg.public_url, ",".join(cfg.company_hosts) or "—")
         try:
             yield
         finally:
