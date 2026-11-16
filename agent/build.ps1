@@ -19,5 +19,10 @@ New-Item -ItemType Directory $out | Out-Null
 Copy-Item dist\FamilyTime "$out\FamilyTime" -Recurse
 Set-Content "$out\FamilyTime\version.txt" $ver -Encoding ascii
 Copy-Item install.ps1, uninstall.ps1, familytime.example.json $out
+# свои доверенные центры сертификации (Минцифры, центр домена) — в пакет, install.ps1 их добавит
+if (Get-ChildItem certs -File -Include *.cer, *.crt, *.pem, *.der -Recurse -ErrorAction SilentlyContinue) {
+    New-Item -ItemType Directory "$out\certs" | Out-Null
+    Get-ChildItem certs -File -Include *.cer, *.crt, *.pem, *.der -Recurse | Copy-Item -Destination "$out\certs"
+}
 Compress-Archive -Path "$out\*" -DestinationPath "dist\FamilyTime-$ver.zip" -Force
 Write-Host "Готово: dist\FamilyTime-$ver.zip"

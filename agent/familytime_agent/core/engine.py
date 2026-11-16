@@ -82,6 +82,10 @@ class Engine:
         self.block_toast = -1e9
         self.update_tries: dict[str, float] = {}     # версия → когда пробовали обновиться
         self.update_thread = None
+        self.ca_path = os.path.join(os.path.dirname(store.path) or ".", "trusted_ca.json")
+        self.trusted_ca: list[dict] = self._load_ca()
+        if self.trusted_ca and hasattr(self.client, "trust"):
+            self.client.trust([c["pem"] for c in self.trusted_ca])
         self.lists_path = os.path.join(os.path.dirname(store.path) or ".", "lists.json")
         self.lists: dict = self._load_lists()
         self._rules_cache: dict[str, tuple] = {}
@@ -90,6 +94,42 @@ class Engine:
         self._dev: dict = {}
         if not self.st.hostname:
             self.st.hostname = platform.hostname()
+
+    # ---------- доверенные сертификаты (сервер 1.4.4+) ----------
+
+    def _load_ca(self) -> list[dict]:
+        try:
+            with open(self.ca_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return [c for c in data if isinstance(c, dict) and c.get("pem")]
+        except (OSError, ValueError):
+            return []
+
+    def apply_trusted_ca(self, items) -> None:
+        """Центры сертификации из политики: в хранилище компьютера (браузеры и всё остальное
+        тоже будут доверять порталу) и в собственный контекст TLS агента. Только при изменении
+        списка; прежние центры из хранилища не удаляются."""
+        if not isinstance(items, list):
+            return
+        items = [c for c in items if isinstance(c, dict) and c.get("pem")][:20]
+        if [c.get("sha1") for c in items] == [c.get("sha1") for c in self.trusted_ca]:
+            return
+        if hasattr(self.p, "trust_certs") and items:
+            try:
+                n = self.p.trust_certs(items)
+                log.info("доверенные сертификаты: добавлено в хранилище %s из %s", n, len(items))
+            except Exception as e:  # noqa: BLE001
+                log.warning("доверенные сертификаты: %s", e)
+        if hasattr(self.client, "trust"):
+            self.client.trust([c["pem"] for c in items])
+        self.trusted_ca = items
+        try:
+            tmp = self.ca_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(items, f)
+            os.replace(tmp, self.ca_path)
+        except OSError as e:
+            log.warning("доверенные сертификаты не сохранены: %s", e)
 
     # ---------- списки (сервер 1.1+: отдельно, по версии) ----------
 
@@ -535,6 +575,7 @@ class Engine:
         self.st.seq = batch["seq"]
         self.st.inflight = None
         self.st.device = r.get("device") or {}
+        self.apply_trusted_ca(self.st.device.get("trusted_ca"))
         for u, p in (r.get("users") or {}).items():
             self.st.users[u] = p
         self.st.server_offset = float(r.get("server_time", t1)) - (t0 + t1) / 2

@@ -106,6 +106,25 @@ class WinPlatform:
     def self_update(self, url: str, sha256: str, version: str) -> None:
         self_update(url, sha256, version)
 
+    def trust_certs(self, items: list[dict]) -> int:
+        """Центры сертификации — в хранилище локального компьютера: корневые в «Доверенные
+        корневые центры» (Root), промежуточные в «Промежуточные центры» (CA)."""
+        base = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "FamilyTime", "ca")
+        os.makedirs(base, exist_ok=True)
+        ok = 0
+        for i, c in enumerate(items):
+            path = os.path.join(base, f"{i}.cer")
+            with open(path, "w", encoding="ascii") as f:
+                f.write(c["pem"])
+            r = subprocess.run(["certutil", "-addstore", "-f", "Root" if c.get("root") else "CA", path],
+                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=60)
+            if r.returncode == 0:
+                ok += 1
+            else:
+                log.warning("certutil %s: код %s %s", c.get("sha1", "")[:12], r.returncode,
+                            r.stdout.decode("cp866", "replace")[-200:])
+        return ok
+
     # ---------- сведения ----------
 
     def hostname(self) -> str:

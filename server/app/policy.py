@@ -54,7 +54,8 @@ DEFAULT_SETTINGS: dict = {
     "location": {"interval_minutes": 15, "lost_interval_minutes": 2},
     # известные адреса: [{"net": "203.0.113.5/32", "lat": .., "lon": .., "accuracy": 50, "name": "Дом"}]
     "ip_locations": [],
-    "auto_update": True,          # агенты 1.4+ ставят загруженную версию сами
+    "auto_update": True,
+    "trusted_ca": [],             # доп. центры сертификации: установщику и агентам (trust.py)          # агенты 1.4+ ставят загруженную версию сами
     "jitter": True,               # разброс точек в Traccar в пределах точности
     "phone_ids": [],              # Traccar Client: точки с известных адресов ставятся на их место
 }
