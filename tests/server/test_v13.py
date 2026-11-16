@@ -491,3 +491,74 @@ def test_agent_auto_update_offer(env):
     vers = sorted(r["version"] for r in run_sql("SELECT version FROM ft_agent_packages", fetch=True))
     assert vers == ["1.4.10", "1.4.2", "1.5.0"]
     assert c.get("/agent/latest").json()["version"] == "1.5.0"
+
+
+def _ca_chain():
+    from datetime import timedelta as td
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    def make(cn, issuer=None, ca=True):
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+        ikey, iname = (key, name) if issuer is None else issuer
+        now = datetime.now(timezone.utc)
+        cert = (x509.CertificateBuilder().subject_name(name).issuer_name(iname)
+                .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                .not_valid_before(now - td(days=1)).not_valid_after(now + td(days=365))
+                .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+                .sign(ikey, hashes.SHA256()))
+        return key, name, cert
+    rk, rn, root = make("Test Root CA")
+    sk, sn, sub = make("Test Sub CA", (rk, rn))
+    _, _, leaf = make("site.example.com", (sk, sn), ca=False)
+    pem = lambda c: c.public_bytes(serialization.Encoding.PEM)  # noqa: E731
+    der = lambda c: c.public_bytes(serialization.Encoding.DER)  # noqa: E731
+    return root, sub, leaf, pem, der
+
+
+def test_trusted_ca(env):
+    import io
+    import zipfile
+    c, _ = env
+    root, sub, leaf, pem, der = _ca_chain()
+    ta = login(c, "root", admin=True)
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w") as z:
+        z.writestr("sub.cer", der(sub))
+    r = c.post("/settings/ca", data={"csrf": ta}, files=[
+        ("files", ("root.cer", der(root), "application/octet-stream")),
+        ("files", ("subs.zip", zbuf.getvalue(), "application/zip")),
+        ("files", ("site.pem", pem(leaf), "application/x-pem-file")),
+        ("files", ("gost.cer", b"\x30\x03garbage", "application/octet-stream"))])
+    assert "Добавлено сертификатов: 2" in r.text and "сертификат сайта" in r.text
+    page = c.get("/settings").text
+    assert "Test Root CA" in page and "корневой" in page and "промежуточный" in page
+    # повторная загрузка — без дублей
+    r = c.post("/settings/ca", data={"csrf": ta}, files=[("files", ("root.pem", pem(root), "x"))])
+    assert "Добавлено сертификатов: 0" in r.text
+    # агенту — в политике
+    h = enroll(c)
+    dev = c.post("/api/agent/heartbeat", headers=h, json={"seq": 1, "caps": ["userlists"]}).json()["device"]
+    assert [x["root"] for x in dev["trusted_ca"]] == [True, False]
+    assert dev["trusted_ca"][0]["pem"].startswith("-----BEGIN CERTIFICATE-----")
+    # в установщик — после exit /b, с импортом до первого обращения к порталу
+    pkg = _package("1.4.1")
+    c.post("/settings/agent", data={"csrf": ta}, files={"package": ("p.zip", pkg, "application/zip")})
+    cmd = c.post("/devices/installer", data={"csrf": ta, "mode": "track"}).content.decode("ascii")
+    lines = cmd.split("\r\n")
+    i_import = next(i for i, x in enumerate(lines) if "X509Store" in x)
+    i_setup = next(i for i, x in enumerate(lines) if "/agent/setup.ps1" in x)
+    i_exit = lines.index("exit /b")
+    assert i_import < i_setup < i_exit
+    tail = cmd[cmd.index("\r\nexit /b\r\n"):]
+    assert tail.count("-----BEGIN CERTIFICATE-----") == 2
+    assert cmd[:cmd.index("\r\nexit /b\r\n")].count("-----END CERTIFICATE-----\r\n") == 0
+    # удаление
+    sha = run_sql("SELECT value FROM ft_settings WHERE key='trusted_ca'", fetch=True)[0]["value"]
+    sha = (json.loads(sha) if isinstance(sha, str) else sha)[0]["sha1"]
+    c.post(f"/settings/ca/{sha}/delete", data={"csrf": ta})
+    dev = c.post("/api/agent/heartbeat", headers=h, json={"seq": 2, "caps": ["userlists"]}).json()["device"]
+    assert len(dev["trusted_ca"]) == 1 and dev["trusted_ca"][0]["root"] is False

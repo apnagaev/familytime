@@ -522,3 +522,20 @@ def test_self_update_offer(tmp_path):
     cli.update = {"version": "9.9.10", "sha256": "cd" * 32}
     assert eng.heartbeat(None, None, clk.wall())
     eng.update_thread.join(5)
+
+
+def test_trusted_ca_from_policy(tmp_path):
+    eng, clk, plat, cli = make(tmp_path)
+    added, trusted = [], []
+    plat.trust_certs = lambda items: added.append([c["sha1"] for c in items]) or len(items)
+    cli.trust = lambda pems: trusted.append(list(pems))
+    items = [{"pem": "-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----", "root": True, "sha1": "aa"}]
+    eng.apply_trusted_ca(items)
+    eng.apply_trusted_ca(items)                       # тот же список — без повторов
+    assert added == [["aa"]] and len(trusted) == 1
+    # после перезапуска службы — из файла, сразу в контекст TLS
+    eng2, _, plat2, cli2 = make(tmp_path)
+    assert eng2.trusted_ca and eng2.trusted_ca[0]["sha1"] == "aa"
+    eng.apply_trusted_ca(items + [{"pem": "x", "root": False, "sha1": "bb"}])
+    assert added[-1] == ["aa", "bb"]
+    eng.apply_trusted_ca("мусор")                     # неверный формат не ломает

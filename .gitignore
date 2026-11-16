@@ -10,3 +10,7 @@ agent/build/
 agent/dist/
 familytime.json
 private/
+
+# свои сертификаты центров — не в git
+agent/certs/*
+!agent/certs/README.md

@@ -103,6 +103,21 @@ try {
     if ($cfgChanged) { Remove-Item (Join-Path $Data "state.json") -Force -ErrorAction SilentlyContinue }
     [IO.File]::WriteAllText($cfgPath, $cfgJson, (New-Object Text.UTF8Encoding $false))
 
+    # ---- доверенные центры сертификации: certs\*.cer|crt|pem рядом с install.ps1 (папка GPO)
+    $certDir = Join-Path $Source "certs"
+    if (Test-Path $certDir) {
+        Get-ChildItem $certDir -File | Where-Object { $_.Extension -in ".cer", ".crt", ".pem", ".der" } | ForEach-Object {
+            $f = $_
+            try {
+                $c = New-Object Security.Cryptography.X509Certificates.X509Certificate2($f.FullName)
+                $store = if ($c.Subject -eq $c.Issuer) { "Root" } else { "CA" }
+                $s = New-Object Security.Cryptography.X509Certificates.X509Store($store, "LocalMachine")
+                $s.Open("ReadWrite"); $s.Add($c); $s.Close()
+                Log "сертификат $($c.GetNameInfo('SimpleName', $false)) → $store"
+            } catch { Log "сертификат $($f.Name) не добавлен: $_" }
+        }
+    }
+
     # ---- местоположение: без него Windows 11 24H2 не отдаёт список Wi-Fi
     $loc = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location"
     New-Item -Path $loc -Force | Out-Null

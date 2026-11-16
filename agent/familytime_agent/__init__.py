@@ -1,2 +1,2 @@
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 PIPE_NAME = r"\\.\pipe\familytime-agent"

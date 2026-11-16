@@ -22,7 +22,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from . import auth
+from . import auth, db, trust
 from .portal import back, list_scope, need_admin, need_parent
 
 log = logging.getLogger("familytime.dist")
@@ -70,8 +70,23 @@ async def use_code(conn, row) -> None:
                        "WHERE id = $1", row["id"])
 
 
-def setup_cmd(url: str, code: str, mode: str) -> str:
-    """Файл для двойного щелчка: только ASCII, строки CRLF — так его понимает любой cmd."""
+IMPORT_CA = (
+    "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
+    "$t=[IO.File]::ReadAllText('%~f0');"
+    "foreach($m in [regex]::Matches($t,'-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----')){"
+    "$b=[Convert]::FromBase64String(($m.Value -replace '-----[A-Z ]+-----','' -replace '\\s',''));"
+    "$c=New-Object Security.Cryptography.X509Certificates.X509Certificate2(,$b);"
+    "$n=if($c.Subject -eq $c.Issuer){'Root'}else{'CA'};"
+    "$s=New-Object Security.Cryptography.X509Certificates.X509Store($n,'LocalMachine');"
+    "$s.Open('ReadWrite');$s.Add($c);$s.Close();"
+    "Write-Host ('Trusted certificate: '+$c.GetNameInfo('SimpleName',$false))}\""
+)
+
+
+def setup_cmd(url: str, code: str, mode: str, certs: list[dict] | None = None) -> str:
+    """Файл для двойного щелчка: только ASCII, строки CRLF — так его понимает любой cmd.
+    Доверенные сертификаты из общих настроек лежат в конце файла, после exit /b: их
+    добавляют в хранилище компьютера до первого обращения к порталу."""
     lines = [
         "@echo off",
         "rem FamilyTime: install or update the agent. Double-click this file.",
@@ -84,13 +99,18 @@ def setup_cmd(url: str, code: str, mode: str) -> str:
         "  powershell -NoProfile -Command \"Start-Process -FilePath '%~f0' -Verb RunAs\"",
         "  exit /b",
         ")",
+        *([IMPORT_CA] if certs else []),
         "powershell -NoProfile -ExecutionPolicy Bypass -Command \""
         "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
         "$w=New-Object Net.WebClient;$w.Encoding=[Text.Encoding]::UTF8;"
         "iex $w.DownloadString($env:FT_URL+'/agent/setup.ps1')\"",
         "echo.",
         "pause",
+        "exit /b",
     ]
+    for c in certs or []:
+        lines += ["", f"rem {c['subject'][:60]}".encode("ascii", "replace").decode()]
+        lines += c["pem"].strip().splitlines()
     return "\r\n".join(lines) + "\r\n"
 
 
@@ -211,6 +231,34 @@ async def _store_package(request: Request, ver: str, sha: str, data: bytes, who:
             await conn.execute("DELETE FROM ft_agent_packages WHERE version = ANY($1::text[])", old)
 
 
+@router.post("/settings/ca")
+async def ca_upload(request: Request, files: list[UploadFile] = File(...), csrf: str = Form("")):
+    u = need_admin(request)
+    auth.check_csrf(request, u, csrf)
+    blobs = [(f.filename or "файл", await f.read(1024 * 1024)) for f in files[:20]]
+    new, errors = trust.parse(blobs)
+    async with request.app.state.pool.acquire() as conn:
+        cur = (await db.get_settings(conn)).get("trusted_ca") or []
+        merged = trust.merge(cur, new)
+        await db.set_setting(conn, "trusted_ca", merged, u.username)
+    added = len(merged) - len(cur)
+    msg = f"Добавлено сертификатов: {added}" + (" (остальные уже были)" if new and added < len(new) else "")
+    if errors:
+        return back("/settings", ok=msg if added else "", err="; ".join(errors[:3])[:400])
+    return back("/settings", ok=msg + ". Новые установщики и агенты 1.4.1+ получат их сразу")
+
+
+@router.post("/settings/ca/{sha1}/delete")
+async def ca_delete(request: Request, sha1: str, csrf: str = Form("")):
+    u = need_admin(request)
+    auth.check_csrf(request, u, csrf)
+    async with request.app.state.pool.acquire() as conn:
+        cur = (await db.get_settings(conn)).get("trusted_ca") or []
+        await db.set_setting(conn, "trusted_ca", [c for c in cur if c["sha1"] != sha1], u.username)
+    return back("/settings", ok="Сертификат убран из списка. С компьютеров, где он уже установлен, "
+                               "он не удаляется")
+
+
 @router.post("/devices/installer")
 async def installer(request: Request, family_id: str = Form(""), mode: str = Form("control"),
                     csrf: str = Form("")):
@@ -233,8 +281,9 @@ async def installer(request: Request, family_id: str = Form(""), mode: str = For
                VALUES ($1, $2, $3, $4, $5)""",
             code_hash(code), fid, mode, u.username,
             datetime.now(timezone.utc) + timedelta(days=CODE_DAYS))
+        certs = (await db.get_settings(conn)).get("trusted_ca") or []
     url = request.app.state.cfg.base_url(request.headers.get("host"))
-    return Response(setup_cmd(url, code, mode).encode("ascii"), media_type="application/octet-stream",
+    return Response(setup_cmd(url, code, mode, certs).encode("ascii", "replace"), media_type="application/octet-stream",
                     headers={"Content-Disposition": 'attachment; filename="FamilyTime-setup.cmd"',
                              "Cache-Control": "no-store"})
 

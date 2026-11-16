@@ -33,6 +33,25 @@
   <p class="hint">Как определяется место: известный адрес → Wi-Fi вокруг (Яндекс Локатор; пока точки и IP те же, прошлое место используется до суток без нового запроса) → без Wi-Fi по внешнему IP, с точностью до города (запоминается на неделю). Действует на все компьютеры всех семей и компаний. Сайты, программы, подписки, простой и предупреждения настраиваются на странице каждого ребёнка, тексты сообщений и чаты Telegram — на странице семьи.</p>
 </div>
 
+<div class="card" id="ca">
+  <h2>Доверенные сертификаты</h2>
+  <p class="hint">Если сайт портала подписан центром, которого нет в Windows по умолчанию (сертификаты Минцифры «Russian Trusted Root CA», центр своего домена), без них компьютеры вне домена не могут связаться с порталом. Загруженные здесь центры установщик <code>FamilyTime-setup.cmd</code> добавляет в хранилище компьютера до первого обращения к порталу, а агенты 1.4.1 и новее получают их с политикой и добавляют сами. Только сертификаты центров (корневые и промежуточные); ГОСТ не нужен.</p>
+  {% if s.trusted_ca %}
+  <table class="small">
+    <tr><th>Центр</th><th>Кем выдан</th><th>Тип</th><th>Действует до</th><th></th></tr>
+    {% for c in s.trusted_ca %}
+    <tr><td title="SHA-1 {{ c.sha1 }}">{{ c.subject }}</td><td>{{ c.issuer }}</td><td>{{ 'корневой' if c.root else 'промежуточный' }}</td><td>{{ c.not_after }}</td>
+      <td><form method="post" action="/settings/ca/{{ c.sha1 }}/delete" class="inline"><input type="hidden" name="csrf" value="{{ user.csrf }}"><button class="ghost small">Убрать</button></form></td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  <form method="post" action="/settings/ca" enctype="multipart/form-data" class="row" style="margin-top: 8px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <input type="file" name="files" accept=".cer,.crt,.pem,.der,.zip" multiple required>
+    <button>Добавить</button>
+  </form>
+</div>
+
 <div class="card" id="agent">
   <h2>Программа для компьютеров вне домена</h2>
   {% if agent_meta %}<p>На сервере: <b>{{ agent_meta.version }}</b> ({{ (agent_meta.size / 1048576)|round(1) }} МБ, {{ agent_meta.uploaded_at.astimezone(cfg.tz).strftime('%d.%m.%Y %H:%M') }}, {{ agent_meta.uploaded_by }}).</p>

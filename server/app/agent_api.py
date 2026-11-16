@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import db, dist, lists, locator, policy
+from . import db, dist, lists, locator, policy, trust
 
 router = APIRouter(prefix="/api/agent")
 
@@ -161,6 +161,8 @@ def device_policy(cfg, dev, settings: dict, union: dict | None, caps=(), child_s
     if "userlists" not in caps and union is not None:
         out = {"lists_version": union["version"]} if "lists" in caps \
             else lists_payload(cfg, union, OLD_AGENT_LIMIT)
+    if settings.get("trusted_ca"):
+        out["trusted_ca"] = trust.for_agent(settings["trusted_ca"])
     return {
         **out,
         "mode": dev["mode"],
