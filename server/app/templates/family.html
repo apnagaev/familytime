@@ -69,6 +69,19 @@
     <p class="hint">Запросы детей этой семьи приходят в эти чаты с кнопками «Дать» и «Отказать». Свой id подскажет бот @userinfobot; боту FamilyTime нужно сначала написать /start.</p>
   </form>
 
+  <form method="post" action="/family/{{ f.id }}" style="margin-top: 12px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="traccar">
+    <label class="block">Карта Traccar</label>
+    <div class="row">
+      <label class="small" style="flex: 1; min-width: 220px">Кому показывать устройства (почта или логин в Traccar)
+        <textarea name="traccar_users" style="min-height: 50px; font-family: monospace" placeholder="пусто — родители семьи по почте из Keycloak">{{ f.traccar_users|join('\n') }}</textarea></label>
+      <label class="small" style="flex: 1; min-width: 220px">Телефоны и устройства VPN семьи (идентификаторы)
+        <textarea name="phone_ids" style="min-height: 50px; font-family: monospace" placeholder="например 82750699 или wg-ivan_ph">{{ f.phone_ids|join('\n') }}</textarea></label>
+    </div>
+    <div class="row"><button class="ghost">Сохранить</button></div>
+    <p class="hint">Компьютеры семьи и перечисленные телефоны и устройства VPN FamilyTime сам добавляет на карту этих пользователей Traccar (выдаёт права на устройство; группы не нужны). Уберёте человека или устройство из списка — FamilyTime заберёт выданные им права. Права, выданные в Traccar вручную, не трогаются. Телефоны из этого списка, кроме того, получают место из «Известных адресов», как телефоны из общих настроек.</p>
+  </form>
+
   {% if user.admin %}
   <form method="post" action="/family/{{ f.id }}" onsubmit="return confirm('Удалить семью? Дети и компьютеры останутся без семьи.')" style="margin-top: 8px">
     <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="delete"><button class="danger">Удалить семью</button>

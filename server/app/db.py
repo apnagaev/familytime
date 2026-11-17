@@ -268,3 +268,12 @@ async def kv_set(conn, key: str, value: str) -> None:
     await conn.execute(
         "INSERT INTO ft_kv VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         key, value)
+
+
+async def remember_person(conn, username: str, email: str, name: str) -> None:
+    """Логин, почта и имя вошедшего — чтобы найти его пользователя в Traccar."""
+    await conn.execute(
+        """INSERT INTO ft_people (username, email, name, seen_at) VALUES ($1, $2, $3, now())
+           ON CONFLICT (username) DO UPDATE SET email = CASE WHEN EXCLUDED.email <> ''
+           THEN EXCLUDED.email ELSE ft_people.email END, name = EXCLUDED.name, seen_at = now()""",
+        username, email or "", (name or "")[:200])

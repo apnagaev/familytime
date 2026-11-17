@@ -301,6 +301,101 @@ async def operator(http, cfg, conn, ip: str) -> str:
     return name
 
 
+async def traccar_users(http, cfg) -> list[dict]:
+    """Пользователи Traccar (нужен токен администратора), список хранится 5 минут."""
+    import time as _t
+    if _t.monotonic() - _users["at"] < ALL_DEVICES_TTL:
+        return _users["items"]
+    h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+    r = await http.get(cfg.traccar_api_url + "/users", headers=h, timeout=20)
+    items = r.json() if r.status_code == 200 else None
+    if isinstance(items, list):
+        _users.update(at=_t.monotonic(), items=[u for u in items if isinstance(u, dict)])
+    else:
+        log.warning("traccar: список пользователей не получен (HTTP %s)", r.status_code)
+    return _users["items"]
+
+
+def match_traccar_users(users: list[dict], wanted: list[str]) -> set[int]:
+    """Номера пользователей Traccar по почте или логину (без учёта регистра)."""
+    keys = {w.strip().lower() for w in wanted if w and w.strip()}
+    out = set()
+    for u in users:
+        for k in ("email", "login", "name"):
+            v = str(u.get(k) or "").strip().lower()
+            if v and v in keys:
+                out.add(int(u["id"]))
+                break
+    return out
+
+
+async def link_device(http, cfg, conn, unique_id: str, wanted: list[str]) -> None:
+    """Устройство — на карту пользователей Traccar из wanted (почта или логин): выдать права
+    тем, у кого их нет, и забрать выданные FamilyTime у тех, кого в списке больше нет
+    (права, выданные вручную, не трогаются). Раз на набор за запуск сервера."""
+    if not (cfg.traccar_api_url and cfg.traccar_token):
+        return
+    did = _device_ids.get(unique_id)
+    if not did:
+        return
+    try:
+        users = await traccar_users(http, cfg) if wanted else []
+    except Exception as e:  # noqa: BLE001
+        log.warning("traccar: пользователи: %s", e)
+        return
+    if wanted and not users:
+        return                  # список не получен — ничего не менять, особенно не забирать права
+    want_ids = match_traccar_users(users, wanted)
+    key = frozenset(want_ids)
+    if _linked.get(unique_id) == key:
+        return
+    h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+    have = {r["user_id"] for r in await conn.fetch(
+        "SELECT user_id FROM ft_traccar_links WHERE unique_id = $1", unique_id)}
+    ok = True
+    for uid in want_ids - have:
+        r = await http.post(cfg.traccar_api_url + "/permissions",
+                            json={"userId": uid, "deviceId": did}, headers=h, timeout=10)
+        # 400 — право уже есть (выдано вручную или раньше)
+        if r.status_code < 300 or r.status_code == 400:
+            await conn.execute("INSERT INTO ft_traccar_links (unique_id, user_id) VALUES ($1, $2) "
+                               "ON CONFLICT DO NOTHING", unique_id, uid)
+            log.info("traccar: %s → на карту пользователя %s", unique_id, uid)
+        else:
+            ok = False
+            log.warning("traccar: %s не выдан пользователю %s: HTTP %s", unique_id, uid, r.status_code)
+    for uid in have - want_ids:
+        r = await http.request("DELETE", cfg.traccar_api_url + "/permissions",
+                               json={"userId": uid, "deviceId": did}, headers=h, timeout=10)
+        if r.status_code < 300 or r.status_code == 404:
+            await conn.execute("DELETE FROM ft_traccar_links WHERE unique_id = $1 AND user_id = $2",
+                               unique_id, uid)
+            log.info("traccar: %s убран с карты пользователя %s", unique_id, uid)
+        else:
+            ok = False
+    if ok:
+        _linked[unique_id] = key
+
+
+async def family_viewers(conn, family_id) -> list[str]:
+    """Кому из Traccar показывать устройства семьи: список из настроек семьи, иначе почта и
+    логины её родителей (почта запоминается при входе в портал через Keycloak)."""
+    if not family_id:
+        return []
+    fam = await conn.fetchrow("SELECT traccar_users FROM ft_families WHERE id = $1", family_id)
+    if fam and fam["traccar_users"]:
+        return list(fam["traccar_users"])
+    rows = await conn.fetch(
+        """SELECT p.username, COALESCE(pe.email, '') AS email FROM ft_family_parents p
+           LEFT JOIN ft_people pe ON pe.username = p.username WHERE p.family_id = $1""", family_id)
+    out = []
+    for r in rows:
+        out.append(r["username"])
+        if r["email"]:
+            out.append(r["email"])
+    return out
+
+
 def jitter(lat: float, lon: float, radius: float, rnd: random.Random | None = None) -> tuple[float, float]:
     """Случайная точка внутри круга радиусом radius метров, равномерно по площади,
     чтобы точки одного места не ложились друг на друга."""
@@ -377,6 +472,9 @@ async def send_osmand(http, cfg, dev, fix: Fix, body, ip: str, now: datetime,
 _group_ids: dict[str, int] = {}
 _ensured: dict[str, str] = {}            # uniqueId → группа, уже проверено в этом процессе
 _all_devices: dict = {"at": float("-inf"), "by_uid": {}}
+_device_ids: dict[str, int] = {}         # uniqueId → id устройства в Traccar
+_linked: dict[str, frozenset] = {}       # uniqueId → кому уже выданы права в этом процессе
+_users: dict = {"at": float("-inf"), "items": []}
 ALL_DEVICES_TTL = 300                    # с: как часто перечитывать полный список устройств
 
 
@@ -466,6 +564,7 @@ async def ensure_traccar_device(http, cfg, unique_id: str, user: str = "", group
                     _all_devices["by_uid"][unique_id] = d
             else:
                 log.info("traccar: %s уже в группе %s (id %s)", unique_id, group or "—", gid)
+            _device_ids[unique_id] = int(d["id"])
             _ensured[unique_id] = group
             return True
         if not name:
@@ -489,6 +588,10 @@ async def ensure_traccar_device(http, cfg, unique_id: str, user: str = "", group
                         r.text[:200])
             return False
         log.info("traccar: создано устройство %s (%s)", unique_id, group or "без группы")
+        try:
+            _device_ids[unique_id] = int(r.json()["id"])
+        except (ValueError, KeyError, TypeError):
+            pass
         _ensured[unique_id] = group
         return True
     except Exception as e:  # noqa: BLE001 — точка важнее устройства в Traccar
