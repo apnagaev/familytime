@@ -140,7 +140,7 @@ def test_location_sources(env):
     assert hosts(calls, n) == ["locator.api.maps.yandex.ru", "geoip.example"]
     assert "по IP, город: Екатеринбург" in c.get("/devices").text
     osm = [x for x in calls if x.url.host == "traccar"][-1]
-    assert osm.url.params["accuracy"] == "10000" and osm.url.params["place"] == "Екатеринбург"
+    assert osm.url.params["accuracy"] == "1" and osm.url.params["place"] == "Екатеринбург"
 
     # 5. внутренний адрес без Wi-Fi и не из таблицы — места нет, наружу не ходим
     n = len(calls)

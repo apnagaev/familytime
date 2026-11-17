@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="spread"><h1>Журнал точек за сутки</h1><a href="/settings">← Общие настройки</a></div>
+<div class="card">
+  <form method="get" action="/settings/points" class="row">
+    <input type="text" name="q" value="{{ q }}" placeholder="устройство, адрес или место" style="flex: 1; min-width: 200px">
+    <button class="ghost">Найти</button>
+  </form>
+  <p class="hint">Телефоны из списка «Телефоны с Traccar Client» и устройства VPN: адрес, с которого пришла точка (у VPN — внешний адрес пира), и место, которое FamilyTime подставил (пусто — точка ушла как есть). Хранится двое суток.</p>
+  {% if rows %}
+  <div class="scroll"><table class="small">
+    <tr><th>Устройство</th><th>Адрес</th><th>Место</th><th class="num">Точек</th><th>Последняя</th></tr>
+    {% for p in rows %}<tr><td>{{ p.device }}</td><td>{{ p.net }}</td><td>{{ p.place or '—' }}</td><td class="num">{{ p.n }}</td><td>{{ p.at.astimezone(cfg.tz).strftime('%d.%m %H:%M') }}</td></tr>{% endfor %}
+  </table></div>
+  {% if rows|length >= 1000 %}<p class="hint">Показаны первые 1000 строк — уточните поиск.</p>{% endif %}
+  {% else %}<p class="muted">Ничего не найдено.</p>{% endif %}
+</div>
+{% endblock %}

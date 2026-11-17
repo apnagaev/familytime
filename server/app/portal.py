@@ -747,14 +747,27 @@ async def settings_page(request: Request):
     u = need_admin(request)
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
-        phones = await conn.fetch(
-            """SELECT device, net, place, max(at) AS at, count(*) AS n
-               FROM ft_phone_fixes WHERE at > now() - interval '1 day'
-               GROUP BY device, net, place ORDER BY max(at) DESC LIMIT 20""")
+        points_devices = await conn.fetchval(
+            "SELECT count(DISTINCT device) FROM ft_phone_fixes WHERE at > now() - interval '1 day'")
         from .dist import settings_extra
         extra = await settings_extra(conn)
-    return page(request, "settings.html", u, s=s, phones=phones,
+    return page(request, "settings.html", u, s=s, points_devices=points_devices,
                 ip_locations=locator.format_ip_locations(s["ip_locations"]), **extra)
+
+
+@router.get("/settings/points")
+async def settings_points(request: Request, q: str = ""):
+    """Журнал точек телефонов и устройств VPN за сутки — отдельной страницей."""
+    u = need_admin(request)
+    async with request.app.state.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT device, net, place, max(at) AS at, count(*) AS n
+               FROM ft_phone_fixes WHERE at > now() - interval '1 day'
+                 AND ($1 = '' OR device ILIKE '%' || $1 || '%' OR net ILIKE '%' || $1 || '%'
+                      OR place ILIKE '%' || $1 || '%')
+               GROUP BY device, net, place ORDER BY device, max(at) DESC LIMIT 1000""",
+            q.strip()[:100])
+    return page(request, "points.html", u, rows=rows, q=q.strip()[:100])
 
 
 @router.post("/settings")

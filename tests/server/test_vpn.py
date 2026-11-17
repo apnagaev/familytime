@@ -127,6 +127,7 @@ def test_vpn_points_by_extip_localip(env):
         c.get("/osmand?id=vpn_laptop&lat=1&lon=1&extip=8.8.8.8&localip=10.9.9.9", headers=wg)
     q = osm(calls).url.params
     assert (q["lat"], q["lon"], q["source"]) == ("59.900000", "30.300000", "yandex-ip")
+    assert q["accuracy"] == "1"                     # город по IP — 1 м, без синего круга
     assert len([x for x in calls if x.url.host == "locator.api.maps.yandex.ru"]) == n + 1
     row = run_sql("SELECT fetched_at FROM ft_geoip WHERE ip = '8.8.8.8'", fetch=True)
     assert row and locator.GEOIP_TTL.days == 30

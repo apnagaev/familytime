@@ -34,6 +34,20 @@ _KNOWN_LINE = re.compile(
 WIFI_REUSE = timedelta(hours=24)      # те же точки Wi-Fi и IP — место не переспрашиваем
 GEOIP_TTL = timedelta(days=30)        # сколько помнить место по IP (экономия запросов к Локатору)
 GEOIP_ACCURACY = 10000.0              # м: место по IP — это город
+COUNTRY_ACCURACY = 50000.0            # м: место по IP грубее — это уже страна
+# Точность, которую получает Traccar для места по IP: настоящий радиус (километры) рисует на
+# карте огромные синие круги, поэтому город отдаётся как 1 м, страна — как 2 м. В портале
+# хранится настоящая точность, разброс точки тоже считается по ней.
+TRACCAR_CITY_ACCURACY = 1
+TRACCAR_COUNTRY_ACCURACY = 2
+
+
+def traccar_accuracy(source: str, accuracy: float, place: str = "") -> float:
+    if source not in ("yandex-ip", "geoip"):
+        return accuracy
+    if (accuracy or 0) > COUNTRY_ACCURACY or (source == "geoip" and not place):
+        return TRACCAR_COUNTRY_ACCURACY
+    return TRACCAR_CITY_ACCURACY
 
 
 @dataclass
@@ -317,7 +331,7 @@ def osmand_params(dev, fix: Fix, body, ip: str, now: datetime, spread: bool = Tr
         "timestamp": int(now.timestamp()),
         "lat": f"{lat:.6f}",
         "lon": f"{lon:.6f}",
-        "accuracy": f"{fix.accuracy:.0f}",
+        "accuracy": f"{traccar_accuracy(fix.source, fix.accuracy, fix.place):.0f}",
         "ignition": "true" if body.session == "active" else "false",
         "source": fix.source,
         "wifiCount": len(body.wifi),
