@@ -408,25 +408,34 @@ async def find_traccar_device(http, cfg, unique_id: str, fresh: bool = False) ->
 
 
 async def traccar_group(http, cfg, name: str) -> int | None:
-    """Номер группы Traccar по имени; нет такой — создаётся."""
+    """Номер группы Traccar по имени — только среди групп владельца токена (GET /groups без
+    all: на общем Traccar у других пользователей бывают свои «PC» и «mobile», и устройство
+    уезжало в чужую группу). Нет такой — создаётся. Число вместо имени — номер группы."""
     name = (name or "").strip()
     if not name:
         return None
+    if name.isdigit():
+        return int(name)
     if name in _group_ids:
         return _group_ids[name]
     h = {"Authorization": f"Bearer {cfg.traccar_token}"}
-    r = await http.get(cfg.traccar_api_url + "/groups", params={"all": "true"}, headers=h, timeout=10)
+    r = await http.get(cfg.traccar_api_url + "/groups", headers=h, timeout=10)
     groups = r.json() if r.status_code == 200 else []
-    for g in groups if isinstance(groups, list) else []:
-        if isinstance(g, dict) and str(g.get("name", "")).strip().lower() == name.lower():
-            _group_ids[name] = int(g["id"])
-            return _group_ids[name]
+    same = [g for g in (groups if isinstance(groups, list) else [])
+            if isinstance(g, dict) and str(g.get("name", "")).strip().lower() == name.lower()]
+    if same:
+        exact = [g for g in same if str(g.get("name", "")).strip() == name]
+        g = (exact or same)[0]
+        _group_ids[name] = int(g["id"])
+        log.info("traccar: группа %s — id %s%s", name, g["id"],
+                 f" (одноимённых у владельца токена: {len(same)})" if len(same) > 1 else "")
+        return _group_ids[name]
     r = await http.post(cfg.traccar_api_url + "/groups", json={"name": name}, headers=h, timeout=10)
     if r.status_code >= 400:
         log.warning("traccar: не создал группу %s: HTTP %s %s", name, r.status_code, r.text[:200])
         return None
     _group_ids[name] = int(r.json()["id"])
-    log.info("traccar: создана группа %s", name)
+    log.info("traccar: создана группа %s — id %s", name, _group_ids[name])
     return _group_ids[name]
 
 
@@ -452,11 +461,11 @@ async def ensure_traccar_device(http, cfg, unique_id: str, user: str = "", group
                     log.warning("traccar: %s не перенесён в группу %s: HTTP %s", unique_id, group,
                                 r.status_code)
                     return False
-                log.info("traccar: %s → группа %s", unique_id, group)
+                log.info("traccar: %s → группа %s (id %s)", unique_id, group, gid)
                 if unique_id in _all_devices["by_uid"]:
                     _all_devices["by_uid"][unique_id] = d
             else:
-                log.info("traccar: %s уже в группе %s", unique_id, group or "—")
+                log.info("traccar: %s уже в группе %s (id %s)", unique_id, group or "—", gid)
             _ensured[unique_id] = group
             return True
         if not name:
