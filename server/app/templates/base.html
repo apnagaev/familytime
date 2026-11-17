@@ -19,6 +19,7 @@
       <a href="/requests" class="{{ 'on' if request.url.path.startswith('/requests') }}">Запросы</a>
       <a href="/devices" class="{{ 'on' if request.url.path.startswith('/devices') }}">Компьютеры</a>
       <a href="/family" class="{{ 'on' if request.url.path.startswith('/family') }}">{{ 'Семьи' if user.admin else 'Семья' }}</a>
+      {% if user.admin %}<a href="/traccar" class="{{ 'on' if request.url.path.startswith('/traccar') }}">Traccar</a>{% endif %}
       {% if user.admin %}<a href="/settings" class="{{ 'on' if request.url.path.startswith('/settings') }}">Настройки</a>{% endif %}
     {% else %}
       <a href="/me" class="on">Моё время</a>
