@@ -376,6 +376,35 @@ async def send_osmand(http, cfg, dev, fix: Fix, body, ip: str, now: datetime,
 
 _group_ids: dict[str, int] = {}
 _ensured: dict[str, str] = {}            # uniqueId → группа, уже проверено в этом процессе
+_all_devices: dict = {"at": float("-inf"), "by_uid": {}}
+ALL_DEVICES_TTL = 300                    # с: как часто перечитывать полный список устройств
+
+
+async def find_traccar_device(http, cfg, unique_id: str, fresh: bool = False) -> dict | None:
+    """Устройство Traccar по uniqueId. Запрос ?uniqueId= Traccar фильтрует по правам владельца
+    токена — устройства, не привязанные к нему (заведённые другими, vpngeo, вручную), так не
+    находятся даже у администратора. Поэтому при промахе — полный список ?all=true
+    (администратор видит все), он хранится 5 минут."""
+    h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+    r = await http.get(cfg.traccar_api_url + "/devices", params={"uniqueId": unique_id},
+                       headers=h, timeout=10)
+    found = r.json() if r.status_code == 200 else []
+    for d in found if isinstance(found, list) else []:
+        if isinstance(d, dict) and d.get("uniqueId") == unique_id:
+            return d
+    import time as _t
+    if fresh or _t.monotonic() - _all_devices["at"] > ALL_DEVICES_TTL:
+        r = await http.get(cfg.traccar_api_url + "/devices", params={"all": "true"},
+                           headers=h, timeout=30)
+        items = r.json() if r.status_code == 200 else None
+        if isinstance(items, list):
+            _all_devices["by_uid"] = {d.get("uniqueId"): d for d in items if isinstance(d, dict)}
+            _all_devices["at"] = _t.monotonic()
+        else:
+            log.warning("traccar: полный список устройств не получен (HTTP %s) — нужен токен "
+                        "администратора", r.status_code)
+    d = _all_devices["by_uid"].get(unique_id)
+    return dict(d) if d else None
 
 
 async def traccar_group(http, cfg, name: str) -> int | None:
@@ -413,12 +442,8 @@ async def ensure_traccar_device(http, cfg, unique_id: str, user: str = "", group
     h = {"Authorization": f"Bearer {cfg.traccar_token}"}
     try:
         gid = await traccar_group(http, cfg, group) if group else cfg.traccar_group_id
-        r = await http.get(cfg.traccar_api_url + "/devices",
-                           params={"uniqueId": unique_id, "all": "true"}, headers=h, timeout=10)
-        found = r.json() if r.status_code == 200 else []
-        found = [d for d in found if isinstance(d, dict)] if isinstance(found, list) else []
-        if found:
-            d = found[0]
+        d = await find_traccar_device(http, cfg, unique_id)
+        if d:
             if gid and d.get("groupId") != gid:
                 d["groupId"] = gid
                 r = await http.put(f"{cfg.traccar_api_url}/devices/{d['id']}", json=d, headers=h,
@@ -428,6 +453,10 @@ async def ensure_traccar_device(http, cfg, unique_id: str, user: str = "", group
                                 r.status_code)
                     return False
                 log.info("traccar: %s → группа %s", unique_id, group)
+                if unique_id in _all_devices["by_uid"]:
+                    _all_devices["by_uid"][unique_id] = d
+            else:
+                log.info("traccar: %s уже в группе %s", unique_id, group or "—")
             _ensured[unique_id] = group
             return True
         if not name:
@@ -442,6 +471,11 @@ async def ensure_traccar_device(http, cfg, unique_id: str, user: str = "", group
             data["groupId"] = gid
         r = await http.post(cfg.traccar_api_url + "/devices", json=data, headers=h, timeout=10)
         if r.status_code >= 400:
+            # уже есть, но не нашлось (список устарел) — перечитать и перенести
+            d = await find_traccar_device(http, cfg, unique_id, fresh=True)
+            if d:
+                _ensured.pop(unique_id, None)
+                return await ensure_traccar_device(http, cfg, unique_id, user, group, name, category)
             log.warning("traccar: не создал устройство %s: HTTP %s %s", unique_id, r.status_code,
                         r.text[:200])
             return False

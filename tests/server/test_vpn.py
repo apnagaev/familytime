@@ -33,6 +33,7 @@ def env():
     lists._cache.clear()
     locator._group_ids.clear()
     locator._ensured.clear()
+    locator._all_devices.update(at=float("-inf"), by_uid={})
     calls = []
     api = {"groups": [], "devices": {}, "next": 100}
 
@@ -57,9 +58,14 @@ def env():
                 api["groups"].append(g)
                 return httpx.Response(200, json=g)
             if path == "/api/devices" and req.method == "GET":
+                if req.url.params.get("all") == "true":
+                    return httpx.Response(200, json=list(api["devices"].values()))
+                # как Traccar: по uniqueId — только устройства, привязанные к владельцу токена
                 d = api["devices"].get(req.url.params["uniqueId"])
-                return httpx.Response(200, json=[d] if d else [])
+                return httpx.Response(200, json=[d] if d and d.get("_linked", True) else [])
             if path == "/api/devices" and req.method == "POST":
+                if json.loads(req.content)["uniqueId"] in api["devices"]:
+                    return httpx.Response(400, text="Duplicate entry")
                 d = {"id": api["next"], **json.loads(req.content)}
                 api["next"] += 1
                 api["devices"][d["uniqueId"]] = d
@@ -168,3 +174,18 @@ def test_traccar_devices_created_in_groups(env):
     groups = {g["name"]: g["id"] for g in api["groups"]}
     assert api["devices"]["pc.example.local"]["groupId"] == groups["PC"]
     assert any(x.method == "PUT" for x in calls if x.url.host == "tapi")
+
+
+def test_unlinked_device_moved_to_group(env):
+    """Устройство заведено не владельцем токена (vpngeo, вручную) — по ?uniqueId= не видно,
+    находится через ?all=true и переносится в группу."""
+    c, calls, api = env
+    t = login(c)
+    save_settings(c, t)
+    api["devices"]["wg-test"] = {"id": 7, "uniqueId": "wg-test", "name": "test", "groupId": 55,
+                                 "_linked": False}
+    c.get("/osmand?id=wg-test&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
+    groups = {g["name"]: g["id"] for g in api["groups"]}
+    assert api["devices"]["wg-test"]["groupId"] == groups["VPN"]
+    assert not any(x.method == "POST" and x.url.path == "/api/devices" for x in calls
+                   if x.url.host == "tapi")

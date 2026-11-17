@@ -38,6 +38,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         lists_task = asyncio.create_task(lists.updater(app.state.pool, app.state.http))
         log.info("familytime %s запущен: PUBLIC_URL=%s, COMPANY_HOSTS=%s", __version__,
                  cfg.public_url, ",".join(cfg.company_hosts) or "—")
+        if not (cfg.traccar_api_url and cfg.traccar_token):
+            log.warning("устройства в Traccar не заводятся и не раскладываются по группам: "
+                        "не заданы TRACCAR_API_URL и TRACCAR_TOKEN")
         try:
             yield
         finally:
