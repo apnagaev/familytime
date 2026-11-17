@@ -225,15 +225,25 @@ def test_family_devices_only_from_parents(env):
     tm = login_as(c, "mom", "mom@example.com")        # мама входила через Keycloak с почтой
     c.post("/children", data={"username": "ivan", "display_name": "Ваня", "csrf": tm})
     fid = run_sql("SELECT id FROM ft_families", fetch=True)[0]["id"]
-    # в Traccar: телефон мамы (её), телефон чужого человека (не её)
+    # папа — второй родитель семьи
+    run_sql("INSERT INTO ft_family_parents VALUES ($1, 'dad')", fid)
+    # в Traccar: телефон мамы, телефон папы, телефон чужого человека
     api["devices"]["82750699"] = {"id": 41, "uniqueId": "82750699", "name": "Телефон мамы"}
+    api["devices"]["77777"] = {"id": 43, "uniqueId": "77777", "name": "Телефон папы"}
     api["devices"]["99999"] = {"id": 42, "uniqueId": "99999", "name": "Чужой"}
-    api["owners"] = {"82750699": {11}, "99999": {77}}
+    api["owners"] = {"82750699": {11}, "77777": {12}, "99999": {77}}
     page = c.get("/family").text
-    assert "Телефон мамы (82750699)" in page and "99999" not in page
-    # чужое устройство не добавить, даже подставив идентификатор
-    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_add", "unique_id": "99999"})
-    assert "нет в Traccar ни у одного родителя" in r.text
+    assert "Телефон мамы (82750699)" in page and "77777" not in page and "99999" not in page
+    # ни чужое, ни папино мама не добавит, даже подставив идентификатор
+    for other in ("99999", "77777"):
+        r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_add", "unique_id": other})
+        assert "нет среди ваших устройств" in r.text
+    # папа добавляет своё сам
+    td = login_as(c, "dad", "dad@other.example")
+    assert "Телефон папы (77777)" in c.get("/family").text
+    r = c.post(f"/family/{fid}", data={"csrf": td, "section": "device_add", "unique_id": "77777"})
+    assert "<code>77777</code>" in r.text
+    tm = login_as(c, "mom", "mom@example.com")
     r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_add", "unique_id": "82750699"})
     assert "Сохранено" in r.text and "<code>82750699</code>" in r.text
     # кому показывать: папа по логину — его права выдаются при точке; телефон обогащается

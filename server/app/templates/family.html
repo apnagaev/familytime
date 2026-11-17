@@ -97,9 +97,9 @@
     <select name="unique_id">{% for d in add %}<option value="{{ d.uniqueId }}">{{ d.name or d.uniqueId }} ({{ d.uniqueId }})</option>{% endfor %}</select>
     <button>Добавить в семью</button>
   </form>
-  {% else %}<p class="small muted">Добавить нечего: в Traccar у родителей семьи нет других устройств.</p>{% endif %}
+  {% else %}<p class="small muted">Добавить нечего: в Traccar у вас нет других устройств{% if not user.email %} (или FamilyTime не знает вашу почту — войдите в портал через Keycloak заново){% endif %}.</p>{% endif %}
   {% endif %}
-  <p class="hint">В список — только устройства, которые в Traccar уже есть хотя бы у одного родителя этой семьи (заводятся в Traccar вручную). Устройство семьи видят на карте все её пользователи Traccar, а его точки FamilyTime обогащает: место из «Известных адресов» (у VPN — по localip/extip и Яндексу), ip и operator. Устройства не из списка остаются личными и проходят через FamilyTime транзитом.</p>
+  <p class="hint">В список — только ваши устройства: те, что в Traccar доступны вам самим (заводятся в Traccar вручную). Устройство другого родителя добавляет он сам — захватить чужое нельзя. Устройство семьи видят на карте все её пользователи Traccar, а его точки FamilyTime обогащает: место из «Известных адресов» (у VPN — по localip/extip и Яндексу), ip и operator. Устройства не из списка остаются личными и проходят через FamilyTime транзитом.</p>
 
   {% if user.admin %}
   <form method="post" action="/family/{{ f.id }}" onsubmit="return confirm('Удалить семью? Дети и компьютеры останутся без семьи.')" style="margin-top: 8px">

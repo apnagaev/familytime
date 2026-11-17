@@ -318,16 +318,19 @@ async def traccar_device_id(http, cfg, unique_id: str) -> int | None:
     return None
 
 
-async def parents_traccar_devices(http, cfg, conn, family_id: int) -> list[dict]:
-    """Устройства Traccar, доступные хотя бы одному родителю семьи (пользователь Traccar
-    находится по логину или почте родителя). Только их родитель может добавить в семью."""
-    if not (cfg.traccar_api_url and cfg.traccar_token):
+async def user_traccar_devices(http, cfg, conn, username: str, email: str = "") -> list[dict]:
+    """Устройства Traccar, доступные этому пользователю портала (его пользователь Traccar
+    находится по логину или по почте, с которой он входил через Keycloak). Только их он и
+    может добавить в семью — устройство другого родителя так не захватить."""
+    if not (cfg.traccar_api_url and cfg.traccar_token) or not username:
         return []
-    rows = await conn.fetch(
-        """SELECT p.username, COALESCE(pe.email, '') AS email FROM ft_family_parents p
-           LEFT JOIN ft_people pe ON pe.username = p.username WHERE p.family_id = $1""", family_id)
-    keys = [x for r in rows for x in (r["username"], r["email"]) if x]
-    ids = match_traccar_users(await traccar_users(http, cfg), keys) if keys else set()
+    keys = {username.lower()}
+    if email:
+        keys.add(email.lower())
+    row = await conn.fetchrow("SELECT email FROM ft_people WHERE username = $1", username)
+    if row and row["email"]:
+        keys.add(row["email"].lower())
+    ids = match_traccar_users(await traccar_users(http, cfg), list(keys))
     h = {"Authorization": f"Bearer {cfg.traccar_token}"}
     out: dict[str, dict] = {}
     for uid in sorted(ids):

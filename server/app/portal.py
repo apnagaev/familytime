@@ -686,16 +686,16 @@ async def family_page(request: Request):
         # что можно добавить: устройства родителей в Traccar, кроме компьютеров с агентом
         pcs = {r["hostname"] for r in await conn.fetch("SELECT hostname FROM ft_devices")}
         addable: dict[int, list] = {}
+        try:
+            mine = [d for d in await locator.user_traccar_devices(
+                request.app.state.http, request.app.state.cfg, conn, u.username, u.email)
+                if str(d["uniqueId"]).lower() not in pcs]
+        except Exception as e:  # noqa: BLE001 — страница важнее
+            log.warning("устройства пользователя в Traccar: %s", e)
+            mine = []
         for f in families:
-            try:
-                have = {d["unique_id"] for d in fdevs.get(f["id"], [])}
-                addable[f["id"]] = [d for d in await locator.parents_traccar_devices(
-                    request.app.state.http, request.app.state.cfg, conn, f["id"])
-                    if str(d["uniqueId"]).lower() not in have
-                    and str(d["uniqueId"]).lower() not in pcs]
-            except Exception as e:  # noqa: BLE001 — страница важнее
-                log.warning("устройства родителей в Traccar: %s", e)
-                addable[f["id"]] = []
+            have = {d["unique_id"] for d in fdevs.get(f["id"], [])}
+            addable[f["id"]] = [d for d in mine if str(d["uniqueId"]).lower() not in have]
     return page(request, "family.html", u, families=families, kids=kids, orphans=orphans,
                 msg=policy.family_messages, fdevs=fdevs, addable=addable,
                 traccar_on=bool(request.app.state.cfg.traccar_api_url and request.app.state.cfg.traccar_token))
@@ -746,13 +746,14 @@ async def family_save(request: Request, family_id: int):
                                family_id, users)
             locator._linked.clear()        # пересчитать права при следующих точках
         elif section == "device_add":
-            # только устройство, которое в Traccar уже есть у кого-то из родителей этой семьи:
-            # так нельзя забрать на свою карту чужой телефон, подобрав идентификатор
+            # только своё устройство: то, что в Traccar доступно самому добавляющему. Так нельзя
+            # забрать на карту семьи ни чужой телефон, ни телефон другого родителя
             uid = str(form.get("unique_id", "")).strip().lower()[:100]
-            own = {str(d["uniqueId"]).lower(): d for d in await locator.parents_traccar_devices(
-                request.app.state.http, request.app.state.cfg, conn, family_id)}
+            own = {str(d["uniqueId"]).lower(): d for d in await locator.user_traccar_devices(
+                request.app.state.http, request.app.state.cfg, conn, u.username, u.email)}
             if uid not in own:
-                return back("/family", err="Этого устройства нет в Traccar ни у одного родителя семьи")
+                return back("/family", err="Этого устройства нет среди ваших устройств в Traccar: "
+                                           "добавить его может только тот, у кого оно есть")
             await conn.execute(
                 """INSERT INTO ft_family_traccar (unique_id, family_id, name, added_by)
                    VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING""",
