@@ -16,7 +16,7 @@
       {% if d.battery is not none %} · 🔋 {{ d.battery }}%{% if d.on_ac %} ⚡{% endif %}{% endif %}
     {% else %}Ещё не выходил на связь{% endif %}<br>
     {% if d.last_fix_at %}Место: <a href="https://yandex.ru/maps/?pt={{ d.last_lon }},{{ d.last_lat }}&z=16&l=map" target="_blank" rel="noopener">{{ '%.5f'|format(d.last_lat) }}, {{ '%.5f'|format(d.last_lon) }}</a> ±{{ d.last_accuracy|int }} м ({{ fmt((now - d.last_fix_at).total_seconds()) }} назад, {{ {'known-ip': 'известный адрес', 'yandex-wifi': 'Wi-Fi', 'yandex-ip': 'по IP', 'geoip': 'по IP, город'}.get(d.last_fix_source, d.last_fix_source) }}{% if d.last_place %}: {{ d.last_place }}{% endif %}){% if cfg.traccar_web_url %} · <a href="{{ cfg.traccar_web_url }}" target="_blank" rel="noopener">Traccar</a>{% endif %}<br>{% endif %}
-    <span class="muted">Агент {{ d.agent_version or '?' }} · {{ d.os_version or '' }} · IP {{ d.last_ip or '' }}</span>
+    <span class="muted">Агент {{ d.agent_version or '?' }} · {{ d.os_version or '' }} · IP {{ d.last_ip or '' }}{% if d.last_operator %} · {{ d.last_operator }}{% endif %}</span>
     {% if agent_meta and d.agent_version and vtuple(d.agent_version) < vtuple(agent_meta.version) %}<br><span class="pill warn">есть {{ agent_meta.version }}</span>
       <span class="small muted">{% if vtuple(d.agent_version) >= (1, 4) %}обновится сам в течение нескольких минут{% else %}эта версия не обновляется сама: один раз запустите на компьютере установщик (ниже){% endif %}</span>{% endif %}
   </div>

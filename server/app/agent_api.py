@@ -444,6 +444,8 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
         fix, sig = await locator.resolve(request.app.state.http, cfg, conn, settings, dev,
                                          body.wifi, ip, body.ext_ip, body.ext_geo)
         ext_ip = locator.public_ip(body.ext_ip) or locator.public_ip(ip)
+        op = await locator.operator(request.app.state.http, cfg, conn, ext_ip) if ext_ip else ""
+        await conn.execute("UPDATE ft_devices SET last_operator = $2 WHERE id = $1", dev["id"], op)
         if fix:
             # повторно использованное место не продлевает свой срок: last_fix_at не трогаем
             await conn.execute(
@@ -467,7 +469,7 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
                                        dev["id"])
             sent = await locator.send_osmand(
                 request.app.state.http, cfg, dev, fix, body, ip, now,
-                spread=bool(settings.get("jitter", True)))
+                spread=bool(settings.get("jitter", True)), operator=op)
     loc = settings["location"]
     interval = loc["lost_interval_minutes"] if dev["lost"] else loc["interval_minutes"]
     return {
