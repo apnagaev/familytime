@@ -51,7 +51,10 @@ def env():
             assert req.headers["authorization"] == "Bearer tok"
             path = req.url.path
             if path == "/api/groups" and req.method == "GET":
-                return httpx.Response(200, json=api["groups"])
+                # без all — только группы владельца токена; с all — и чужие
+                return httpx.Response(200, json=[g for g in api["groups"]
+                                                 if req.url.params.get("all") == "true"
+                                                 or g.get("_own", True)])
             if path == "/api/groups" and req.method == "POST":
                 g = {"id": api["next"], **json.loads(req.content)}
                 api["next"] += 1
@@ -189,3 +192,19 @@ def test_unlinked_device_moved_to_group(env):
     assert api["devices"]["wg-test"]["groupId"] == groups["VPN"]
     assert not any(x.method == "POST" and x.url.path == "/api/devices" for x in calls
                    if x.url.host == "tapi")
+
+
+def test_foreign_group_with_same_name_ignored(env):
+    """На общем Traccar у другого пользователя своя группа «VPN» — устройство в неё не уходит."""
+    c, calls, api = env
+    t = login(c)
+    save_settings(c, t)
+    api["groups"].append({"id": 900, "name": "VPN", "_own": False})
+    c.get("/osmand?id=wg-x&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
+    own = [g for g in api["groups"] if g["name"] == "VPN" and g.get("_own", True)]
+    assert len(own) == 1 and api["devices"]["wg-x"]["groupId"] == own[0]["id"] != 900
+    # номер группы вместо имени
+    locator._ensured.clear()
+    save_settings(c, t, traccar_group_vpn="900")
+    c.get("/osmand?id=wg-x&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
+    assert api["devices"]["wg-x"]["groupId"] == 900

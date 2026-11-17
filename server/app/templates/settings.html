@@ -29,7 +29,7 @@
     <textarea name="vpn_prefixes" style="min-height: 50px; font-family: monospace">{{ s.vpn_prefixes|join('\n') }}</textarea>
 
     <h2 style="margin-top: 18px">Группы Traccar</h2>
-    <p class="hint">Устройства, которых ещё нет в Traccar, FamilyTime заводит сам и кладёт в группу (группа создаётся, если её нет; уже существующие устройства переносятся в неё). Пусто — без группы. Нужны токен администратора Traccar и адрес API.</p>
+    <p class="hint">Устройства, которых ещё нет в Traccar, FamilyTime заводит сам и кладёт в группу (группа создаётся, если её нет; уже существующие устройства переносятся в неё). Пусто — группу не трогать. Группа ищется по имени среди групп владельца токена (чужие одноимённые на общем Traccar не берутся); можно указать и номер группы — его видно в адресе страницы группы в Traccar (<code>/settings/group/12</code>). Нужны токен администратора Traccar и адрес API.</p>
     <div class="row">
       <label>Компьютеры <input type="text" name="traccar_group_pc" value="{{ s.traccar_group_pc }}" placeholder="PC"></label>
       <label>VPN <input type="text" name="traccar_group_vpn" value="{{ s.traccar_group_vpn }}" placeholder="VPN"></label>
