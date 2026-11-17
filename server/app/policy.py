@@ -60,7 +60,7 @@ DEFAULT_SETTINGS: dict = {
     "vpn_prefixes": ["wg-"],      # точки устройств VPN (vpngeo): место по extip/localip
     "traccar_group_pc": "PC",     # группы Traccar для устройств, которые заводит FamilyTime
     "traccar_group_vpn": "VPN",
-    "traccar_group_phone": "",
+    "traccar_group_phone": "",    # группы по умолчанию (если в семье не заданы): pc / vpn / mobile
     "phone_ids": [],              # Traccar Client: точки с известных адресов ставятся на их место
 }
 

@@ -318,16 +318,13 @@ async def traccar_device_id(http, cfg, unique_id: str) -> int | None:
     return None
 
 
-async def parents_traccar_devices(http, cfg, conn, family_id: int) -> list[dict]:
-    """Устройства Traccar, доступные хотя бы одному родителю семьи (пользователь Traccar
-    находится по логину или почте родителя). Только их родитель может добавить в семью."""
-    if not (cfg.traccar_api_url and cfg.traccar_token):
+async def user_traccar_devices(http, cfg, conn, username: str, email: str = "") -> list[dict]:
+    """Устройства Traccar, доступные этому пользователю портала (его пользователь Traccar
+    находится по логину или по почте, с которой он входил через Keycloak). Только их он и
+    может добавить в семью — устройство другого родителя так не захватить."""
+    if not (cfg.traccar_api_url and cfg.traccar_token) or not username:
         return []
-    rows = await conn.fetch(
-        """SELECT p.username, COALESCE(pe.email, '') AS email FROM ft_family_parents p
-           LEFT JOIN ft_people pe ON pe.username = p.username WHERE p.family_id = $1""", family_id)
-    keys = [x for r in rows for x in (r["username"], r["email"]) if x]
-    ids = match_traccar_users(await traccar_users(http, cfg), keys) if keys else set()
+    ids = await user_traccar_ids(http, cfg, conn, username, email)
     h = {"Authorization": f"Bearer {cfg.traccar_token}"}
     out: dict[str, dict] = {}
     for uid in sorted(ids):
@@ -517,6 +514,23 @@ _users: dict = {"at": float("-inf"), "items": []}
 ALL_DEVICES_TTL = 300                    # с: как часто перечитывать полный список устройств
 
 
+async def all_traccar_devices(http, cfg, fresh: bool = False) -> dict:
+    """Все устройства Traccar (?all=true, нужен администратор): uniqueId → устройство, кеш 5 минут."""
+    import time as _t
+    if fresh or _t.monotonic() - _all_devices["at"] > ALL_DEVICES_TTL:
+        h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+        r = await http.get(cfg.traccar_api_url + "/devices", params={"all": "true"},
+                           headers=h, timeout=30)
+        items = r.json() if r.status_code == 200 else None
+        if isinstance(items, list):
+            _all_devices["by_uid"] = {d.get("uniqueId"): d for d in items if isinstance(d, dict)}
+            _all_devices["at"] = _t.monotonic()
+        else:
+            log.warning("traccar: полный список устройств не получен (HTTP %s) — нужен токен "
+                        "администратора", r.status_code)
+    return _all_devices["by_uid"]
+
+
 async def find_traccar_device(http, cfg, unique_id: str, fresh: bool = False) -> dict | None:
     """Устройство Traccar по uniqueId. Запрос ?uniqueId= Traccar фильтрует по правам владельца
     токена — устройства, не привязанные к нему (заведённые другими, vpngeo, вручную), так не
@@ -529,18 +543,7 @@ async def find_traccar_device(http, cfg, unique_id: str, fresh: bool = False) ->
     for d in found if isinstance(found, list) else []:
         if isinstance(d, dict) and d.get("uniqueId") == unique_id:
             return d
-    import time as _t
-    if fresh or _t.monotonic() - _all_devices["at"] > ALL_DEVICES_TTL:
-        r = await http.get(cfg.traccar_api_url + "/devices", params={"all": "true"},
-                           headers=h, timeout=30)
-        items = r.json() if r.status_code == 200 else None
-        if isinstance(items, list):
-            _all_devices["by_uid"] = {d.get("uniqueId"): d for d in items if isinstance(d, dict)}
-            _all_devices["at"] = _t.monotonic()
-        else:
-            log.warning("traccar: полный список устройств не получен (HTTP %s) — нужен токен "
-                        "администратора", r.status_code)
-    d = _all_devices["by_uid"].get(unique_id)
+    d = (await all_traccar_devices(http, cfg, fresh)).get(unique_id)
     return dict(d) if d else None
 
 
@@ -577,62 +580,153 @@ async def traccar_group(http, cfg, name: str) -> int | None:
 
 
 async def ensure_traccar_device(http, cfg, unique_id: str, user: str = "", group: str = "",
-                                name: str = "", category: str = "") -> bool:
-    """Устройство в Traccar: создаётся, если его нет, и кладётся в группу group (по имени;
-    группа создаётся сама). Уже существующее переносится в эту группу. Проверяется один раз
-    за запуск сервера. Нужны TRACCAR_API_URL и TRACCAR_TOKEN (администратора)."""
+                                name: str = "", category: str = "", conn=None) -> bool:
+    """Компьютер с агентом в Traccar: создаётся, если его нет. Группа group назначается один
+    раз — при первом обращении (см. assign_group_once); потом FamilyTime её не трогает, и
+    ручной перенос в Traccar сохраняется. Нужны TRACCAR_API_URL и TRACCAR_TOKEN."""
     if not (cfg.traccar_api_url and cfg.traccar_token):
         return True        # регистрация вручную или registerUnknown в Traccar
-    if _ensured.get(unique_id) == group:
-        return True
-    h = {"Authorization": f"Bearer {cfg.traccar_token}"}
-    try:
-        gid = await traccar_group(http, cfg, group) if group else cfg.traccar_group_id
-        d = await find_traccar_device(http, cfg, unique_id)
-        if d:
-            if gid and d.get("groupId") != gid:
-                d["groupId"] = gid
-                r = await http.put(f"{cfg.traccar_api_url}/devices/{d['id']}", json=d, headers=h,
-                                   timeout=10)
-                if r.status_code >= 400:
-                    log.warning("traccar: %s не перенесён в группу %s: HTTP %s", unique_id, group,
-                                r.status_code)
-                    return False
-                log.info("traccar: %s → группа %s (id %s)", unique_id, group, gid)
-                if unique_id in _all_devices["by_uid"]:
-                    _all_devices["by_uid"][unique_id] = d
-            else:
-                log.info("traccar: %s уже в группе %s (id %s)", unique_id, group or "—", gid)
-            _device_ids[unique_id] = int(d["id"])
-            _ensured[unique_id] = group
-            return True
-        if not name:
-            name = unique_id.split(".")[0] if "." in unique_id and not unique_id[0].isdigit() \
-                else unique_id
-            if user:
-                name = f"{name} ({user.split(chr(92))[-1]})"
-        data = {"name": name[:120], "uniqueId": unique_id}
-        if category:
-            data["category"] = category
-        if gid:
-            data["groupId"] = gid
-        r = await http.post(cfg.traccar_api_url + "/devices", json=data, headers=h, timeout=10)
-        if r.status_code >= 400:
-            # уже есть, но не нашлось (список устарел) — перечитать и перенести
-            d = await find_traccar_device(http, cfg, unique_id, fresh=True)
-            if d:
-                _ensured.pop(unique_id, None)
-                return await ensure_traccar_device(http, cfg, unique_id, user, group, name, category)
-            log.warning("traccar: не создал устройство %s: HTTP %s %s", unique_id, r.status_code,
-                        r.text[:200])
-            return False
-        log.info("traccar: создано устройство %s (%s)", unique_id, group or "без группы")
+    if unique_id not in _ensured:
+        h = {"Authorization": f"Bearer {cfg.traccar_token}"}
         try:
-            _device_ids[unique_id] = int(r.json()["id"])
-        except (ValueError, KeyError, TypeError):
-            pass
-        _ensured[unique_id] = group
-        return True
-    except Exception as e:  # noqa: BLE001 — точка важнее устройства в Traccar
-        log.warning("traccar api: %s", e)
-        return False
+            d = await find_traccar_device(http, cfg, unique_id)
+            if not d:
+                if not name:
+                    name = unique_id.split(".")[0] if "." in unique_id and not unique_id[0].isdigit() \
+                        else unique_id
+                    if user:
+                        name = f"{name} ({user.split(chr(92))[-1]})"
+                data = {"name": name[:120], "uniqueId": unique_id}
+                if category:
+                    data["category"] = category
+                r = await http.post(cfg.traccar_api_url + "/devices", json=data, headers=h, timeout=10)
+                if r.status_code >= 400:
+                    d = await find_traccar_device(http, cfg, unique_id, fresh=True)
+                    if not d:
+                        log.warning("traccar: не создал устройство %s: HTTP %s %s", unique_id,
+                                    r.status_code, r.text[:200])
+                        return False
+                else:
+                    d = r.json()
+                    log.info("traccar: создано устройство %s", unique_id)
+            _device_ids[unique_id] = int(d["id"])
+            _ensured[unique_id] = "ok"
+        except Exception as e:  # noqa: BLE001 — точка важнее устройства в Traccar
+            log.warning("traccar api: %s", e)
+            return False
+    if group and conn is not None:
+        await assign_group_once(http, cfg, conn, unique_id, group)
+    return True
+
+
+async def assign_group_once(http, cfg, conn, unique_id: str, group: str) -> None:
+    """Положить существующее устройство в группу — только при первом обращении: запомнив
+    назначение (ft_traccar_assigned), FamilyTime больше группу этого устройства не меняет.
+    Пустое имя группы — ничего не делать (и не запоминать: назначится, когда группа появится)."""
+    if not group or not (cfg.traccar_api_url and cfg.traccar_token):
+        return
+    if await conn.fetchval("SELECT 1 FROM ft_traccar_assigned WHERE unique_id = $1", unique_id):
+        return
+    try:
+        gid = await traccar_group(http, cfg, group)
+        if not gid:
+            return
+        d = await find_traccar_device(http, cfg, unique_id)
+        if not d:
+            return                                   # устройства ещё нет — назначим, когда появится
+        if d.get("groupId") != gid:
+            d["groupId"] = gid
+            h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+            r = await http.put(f"{cfg.traccar_api_url}/devices/{d['id']}", json=d, headers=h, timeout=10)
+            if r.status_code >= 400:
+                log.warning("traccar: %s не перенесён в группу %s: HTTP %s", unique_id, group,
+                            r.status_code)
+                return
+            if unique_id in _all_devices["by_uid"]:
+                _all_devices["by_uid"][unique_id] = d
+            log.info("traccar: %s → группа %s (id %s), один раз", unique_id, group, gid)
+        _device_ids[unique_id] = int(d["id"])
+        await conn.execute("INSERT INTO ft_traccar_assigned (unique_id, group_id) VALUES ($1, $2) "
+                           "ON CONFLICT DO NOTHING", unique_id, gid)
+    except Exception as e:  # noqa: BLE001
+        log.warning("traccar: группа для %s: %s", unique_id, e)
+
+
+async def group_for(conn, settings: dict, family_id, kind: str) -> str:
+    """Имя группы для устройства вида kind (pc | vpn | mobile): из семьи, иначе по умолчанию
+    из общих настроек."""
+    col = {"pc": "group_pc", "vpn": "group_vpn", "mobile": "group_mobile"}[kind]
+    if family_id:
+        v = await conn.fetchval(f"SELECT {col} FROM ft_families WHERE id = $1", family_id)
+        if v:
+            return v
+    return str(settings.get({"pc": "traccar_group_pc", "vpn": "traccar_group_vpn",
+                             "mobile": "traccar_group_phone"}[kind]) or "")
+
+
+async def owner_groups(http, cfg, user_id: int | None = None) -> list[dict]:
+    """Группы владельца токена или (для администратора Traccar) указанного пользователя."""
+    if not (cfg.traccar_api_url and cfg.traccar_token):
+        return []
+    h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+    r = await http.get(cfg.traccar_api_url + "/groups",
+                       params={"userId": user_id} if user_id else None, headers=h, timeout=20)
+    items = r.json() if r.status_code == 200 else []
+    return sorted([g for g in items if isinstance(g, dict) and "id" in g] if isinstance(items, list)
+                  else [], key=lambda g: str(g.get("name", "")).lower())
+
+
+async def user_traccar_ids(http, cfg, conn, username: str, email: str = "") -> set[int]:
+    keys = {username.lower()} if username else set()
+    if email:
+        keys.add(email.lower())
+    row = await conn.fetchrow("SELECT email FROM ft_people WHERE username = $1", username)
+    if row and row["email"]:
+        keys.add(row["email"].lower())
+    return match_traccar_users(await traccar_users(http, cfg), list(keys)) if keys else set()
+
+
+async def user_traccar_groups(http, cfg, conn, username: str, email: str = "") -> list[dict]:
+    """Группы Traccar, доступные этому пользователю портала."""
+    if not (cfg.traccar_api_url and cfg.traccar_token) or not username:
+        return []
+    out: dict[int, dict] = {}
+    for uid in sorted(await user_traccar_ids(http, cfg, conn, username, email)):
+        for g in await owner_groups(http, cfg, uid):
+            out.setdefault(int(g["id"]), g)
+    return sorted(out.values(), key=lambda g: str(g.get("name", "")).lower())
+
+
+async def sync_family_groups(http, cfg, conn, family_id: int) -> None:
+    """Права пользователей семьи на её группы устройств (/api/permissions userId+groupId):
+    выдать недостающие, забрать выданные FamilyTime и больше не нужные — если ту же пару не
+    держит другая семья. Выданные вручную не трогаются."""
+    if not (cfg.traccar_api_url and cfg.traccar_token):
+        return
+    viewers = await family_viewers(conn, family_id)
+    users = await traccar_users(http, cfg) if viewers else []
+    if viewers and not users:
+        return
+    want_users = match_traccar_users(users, viewers)
+    groups = {r["group_id"] for r in await conn.fetch(
+        "SELECT group_id FROM ft_family_groups WHERE family_id = $1", family_id)}
+    want = {(g, u) for g in groups for u in want_users}
+    have = {(r["group_id"], r["user_id"]) for r in await conn.fetch(
+        "SELECT group_id, user_id FROM ft_traccar_group_links WHERE family_id = $1", family_id)}
+    h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+    for g, u in want - have:
+        r = await http.post(cfg.traccar_api_url + "/permissions", json={"userId": u, "groupId": g},
+                            headers=h, timeout=10)
+        if r.status_code < 300 or r.status_code == 400:
+            await conn.execute("INSERT INTO ft_traccar_group_links VALUES ($1, $2, $3) "
+                               "ON CONFLICT DO NOTHING", family_id, g, u)
+            log.info("traccar: группа %s → пользователю %s (семья %s)", g, u, family_id)
+    for g, u in have - want:
+        await conn.execute("DELETE FROM ft_traccar_group_links WHERE family_id = $1 AND group_id = $2 "
+                           "AND user_id = $3", family_id, g, u)
+        if await conn.fetchval("SELECT 1 FROM ft_traccar_group_links WHERE group_id = $1 AND user_id = $2",
+                               g, u):
+            continue                                  # ту же группу этому человеку даёт другая семья
+        await http.request("DELETE", cfg.traccar_api_url + "/permissions",
+                           json={"userId": u, "groupId": g}, headers=h, timeout=10)
+        log.info("traccar: группа %s забрана у пользователя %s", g, u)

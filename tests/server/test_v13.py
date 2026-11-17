@@ -189,7 +189,7 @@ def test_traccar_client_points(env):
     c.get("/osmand?id=my-phone&lat=55.9&lon=37.9&accuracy=7", headers={"X-Real-IP": "8.8.8.8"})
     assert last().url.params["lat"] == "55.9" and "source" not in last().url.params
     c.get("/osmand?id=stranger&lat=55.9&lon=37.9&accuracy=7", headers={"X-Real-IP": "10.20.30.50"})
-    assert last().url.params["lat"] == "55.9"
+    assert last().url.params["lat"] == "55.750000"      # с 1.8 обогащаются все устройства
     # разброс в пределах точности
     c.post("/settings", data={"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2",
                               "phone_ids": "my-phone", "jitter": "1",
@@ -203,7 +203,7 @@ def test_traccar_client_points(env):
     page = c.get("/settings").text
     assert 'href="/settings/points"' in page and "<td>my-phone</td>" not in page
     page = c.get("/settings/points").text
-    assert "my-phone" in page and "Дом" in page and "транзит" in page
+    assert "my-phone" in page and "Дом" in page
     assert "my-phone" not in c.get("/settings/points?q=nothing").text
     h = enroll(c)
     r = c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.88"}, json={
@@ -627,8 +627,8 @@ def test_traccar_accuracy_for_ip_locations():
     assert t("yandex-ip", 8000) == 1 and t("yandex-ip", 400000) == 2
 
 
-def test_personal_devices_transit(env):
-    """Устройство не из семьи — транзитом: без подмены места и operator, только настоящий ip."""
+def test_all_osmand_devices_enriched(env):
+    """С 1.8 обогащаются все устройства, а не только устройства семей."""
     c, calls = env
     t = login(c, "root", admin=True)
     c.post("/settings", data={"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2",
@@ -636,11 +636,8 @@ def test_personal_devices_transit(env):
                               "ip_locations": "10.20.30.0/24 55.75 37.61 40 Дом"})
     c.get("/osmand?id=mine&lat=1&lon=2&ip=6.6.6.6", headers={"X-Real-IP": "10.20.30.50"})
     q = [x for x in calls if x.url.host == "traccar"][-1].url.params
-    assert q["lat"] == "1" and "source" not in q and "operator" not in q
-    assert q.get_list("ip") == ["10.20.30.50"]
-    # VPN не из семьи — совсем как есть (ip и прочее — от vpngeo)
+    assert q["source"] == "known-ip" and q.get_list("ip") == ["10.20.30.50"]
     c.get("/osmand?id=wg-x&lat=1&lon=2&ip=9.9.9.9&extip=95.31.1.20&localip=10.20.30.5",
           headers={"X-Real-IP": "10.20.40.5"})
     q = [x for x in calls if x.url.host == "traccar"][-1].url.params
-    assert q["lat"] == "1" and q["ip"] == "9.9.9.9" and "operator" not in q
-    assert "транзит" in c.get("/settings/points").text
+    assert q["source"] == "known-ip" and q["ip"] == "95.31.1.20" and q["operator"] == "Test Telecom"
