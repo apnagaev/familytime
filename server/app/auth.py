@@ -215,6 +215,12 @@ async def callback(request: Request, code: str, state: str) -> RedirectResponse:
     resp = RedirectResponse(flow.get("next", "/"), 302)
     resp.delete_cookie(FLOW_COOKIE)
     make_session(cfg, resp, username, name, parent, admin, email)
+    try:                    # почта пригодится, чтобы найти пользователя в Traccar
+        async with request.app.state.pool.acquire() as conn:
+            from . import db
+            await db.remember_person(conn, username, email, str(name))
+    except Exception as e:  # noqa: BLE001 — вход важнее
+        log.warning("не запомнил %s: %s", username, e)
     return resp
 
 

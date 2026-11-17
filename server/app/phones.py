@@ -210,7 +210,7 @@ async def refine(request: Request, settings: dict, point: dict | None, ip: str) 
     None — точку не трогать. Последние точки телефонов видны в общих настройках."""
     if not point:
         return None
-    allowed = {x.lower() for x in settings.get("phone_ids", [])}
+    allowed = {x.lower() for x in settings.get("phone_ids", [])} | set(settings.get("_family_phones", ()))
     if point["id"].lower() not in allowed:
         return None
     known = locator.match_known(settings.get("ip_locations", []), ip)
@@ -264,6 +264,11 @@ async def _handle(request: Request) -> Response:
     try:
         async with request.app.state.pool.acquire() as conn:
             settings = await db.get_settings(conn)
+            fam = await conn.fetchrow(
+                "SELECT id FROM ft_families WHERE $1 = ANY(phone_ids) LIMIT 1", device.lower()) \
+                if device else None
+        if fam:
+            settings["_family_phones"] = {device.lower()}
         vpn = is_vpn(device, settings.get("vpn_prefixes"))
         if vpn:
             fix, ext = await refine_vpn(request, settings, point, params, ip)
@@ -273,7 +278,11 @@ async def _handle(request: Request) -> Response:
             fix = await refine(request, settings, point, ip)
         if device and point:
             group = settings.get("traccar_group_vpn" if vpn else "traccar_group_phone") or ""
-            await locator.ensure_traccar_device(http, cfg, device, group=str(group))
+            ok = await locator.ensure_traccar_device(http, cfg, device, group=str(group))
+            if ok:          # устройство из списка семьи — на карту её пользователей Traccar
+                async with request.app.state.pool.acquire() as conn:
+                    await locator.link_device(http, cfg, conn, device,
+                                              await locator.family_viewers(conn, fam["id"] if fam else None))
     except Exception as e:  # noqa: BLE001 — точка в Traccar важнее
         log.warning("точка %s: %s", device, e)
     if fix:

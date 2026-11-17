@@ -222,3 +222,19 @@ CREATE TABLE IF NOT EXISTS ft_ip_operator (
     fetched_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS last_operator text NOT NULL DEFAULT '';
+
+-- 1.6: устройства семьи — на карту её пользователей Traccar
+ALTER TABLE ft_families ADD COLUMN IF NOT EXISTS traccar_users text[] NOT NULL DEFAULT '{}';
+ALTER TABLE ft_families ADD COLUMN IF NOT EXISTS phone_ids text[] NOT NULL DEFAULT '{}';
+CREATE TABLE IF NOT EXISTS ft_people (
+    username text PRIMARY KEY,
+    email    text NOT NULL DEFAULT '',
+    name     text NOT NULL DEFAULT '',
+    seen_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ft_traccar_links (      -- права, выданные FamilyTime
+    unique_id text NOT NULL,
+    user_id   bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (unique_id, user_id)
+);

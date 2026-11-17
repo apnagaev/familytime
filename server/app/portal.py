@@ -241,6 +241,8 @@ async def dev_login(request: Request, u: str, parent: str = "", admin: str = "",
         raise HTTPException(404)
     resp = RedirectResponse("/", 302)
     auth.make_session(cfg, resp, u.lower(), u, parent == "1", admin == "1", email.lower())
+    async with request.app.state.pool.acquire() as conn:
+        await db.remember_person(conn, u.lower(), email.lower(), u)
     return resp
 
 
@@ -716,12 +718,20 @@ async def family_save(request: Request, family_id: int):
                      if re.fullmatch(r"-?\d{3,20}", c)]
             await conn.execute("UPDATE ft_families SET telegram_chats = $2 WHERE id = $1",
                                family_id, chats[:10])
+        elif section == "traccar":
+            users = [x for x in re.split(r"[\s,;]+", str(form.get("traccar_users", "")).strip()) if x][:50]
+            phones = [x.lower() for x in re.split(r"[\s,;]+", str(form.get("phone_ids", "")).strip())
+                      if x][:100]
+            await conn.execute("UPDATE ft_families SET traccar_users = $2, phone_ids = $3 WHERE id = $1",
+                               family_id, users, phones)
+            locator._linked.clear()        # пересчитать права при следующих точках
         elif section == "add_parent":
             login = norm_login(str(form.get("parent", "")))
             if not login:
                 return back("/family", err="Укажите логин родителя (как в Keycloak)")
             await conn.execute("INSERT INTO ft_family_parents VALUES ($1, $2) ON CONFLICT DO NOTHING",
                                family_id, login)
+            locator._linked.clear()
         elif section == "remove_parent":
             login = norm_login(str(form.get("parent", "")))
             if login == u.username and not u.admin:
@@ -729,6 +739,7 @@ async def family_save(request: Request, family_id: int):
                                            "администратора")
             await conn.execute("DELETE FROM ft_family_parents WHERE family_id = $1 AND username = $2",
                                family_id, login)
+            locator._linked.clear()
         elif section == "delete":
             if not u.admin:
                 raise HTTPException(403, "Удалить семью может только администратор")
@@ -849,6 +860,7 @@ async def device_save(request: Request, dev_id: UUID, mode: str = Form("control"
             """UPDATE ft_devices SET mode = $2, lost = $3, lost_lock = $4, lost_message = $5,
                family_id = $6 WHERE id = $1""",
             dev_id, mode, lost == "1", lost_lock == "1", lost_message.strip()[:500], fid)
+    locator._linked.pop(dev["hostname"], None)     # другая семья — другие пользователи Traccar
     return back("/devices", ok="Сохранено")
 
 

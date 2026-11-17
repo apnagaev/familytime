@@ -34,8 +34,13 @@ def env():
     locator._group_ids.clear()
     locator._ensured.clear()
     locator._all_devices.update(at=float("-inf"), by_uid={})
+    locator._device_ids.clear()
+    locator._linked.clear()
+    locator._users.update(at=float("-inf"), items=[])
     calls = []
-    api = {"groups": [], "devices": {}, "next": 100}
+    api = {"groups": [], "devices": {}, "next": 100, "perms": set(),
+           "users": [{"id": 11, "email": "mom@example.com", "name": "Мама"},
+                     {"id": 12, "login": "dad", "email": "dad@other.example"}]}
 
     def handler(req: httpx.Request):
         calls.append(req)
@@ -73,6 +78,19 @@ def env():
                 api["next"] += 1
                 api["devices"][d["uniqueId"]] = d
                 return httpx.Response(200, json=d)
+            if path == "/api/users" and req.method == "GET":
+                return httpx.Response(200, json=api["users"])
+            if path == "/api/permissions":
+                b = json.loads(req.content)
+                key = (b["userId"], b["deviceId"])
+                if req.method == "POST":
+                    if key in api["perms"]:
+                        return httpx.Response(400, text="Duplicate")
+                    api["perms"].add(key)
+                    return httpx.Response(204)
+                if req.method == "DELETE":
+                    api["perms"].discard(key)
+                    return httpx.Response(204)
             m = re.fullmatch(r"/api/devices/(\d+)", path)
             if m and req.method == "PUT":
                 d = json.loads(req.content)
@@ -208,3 +226,37 @@ def test_foreign_group_with_same_name_ignored(env):
     save_settings(c, t, traccar_group_vpn="900")
     c.get("/osmand?id=wg-x&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
     assert api["devices"]["wg-x"]["groupId"] == 900
+
+
+def test_family_devices_on_family_users_map(env):
+    """Компьютеры и телефоны семьи — на карту её пользователей Traccar (права на устройство)."""
+    c, calls, api = env
+    t = login(c)
+    save_settings(c, t)
+    # мама входила через Keycloak с подтверждённой почтой — её найдём в Traccar по почте
+    c.cookies.clear()
+    c.get("/dev-login?u=mom&parent=1&email=mom@example.com", follow_redirects=False)
+    tm = re.search(r'name="csrf" value="([^"]+)"', c.get("/dashboard").text).group(1)
+    c.post("/children", data={"username": "ivan", "display_name": "Ваня", "csrf": tm})
+    fid = run_sql("SELECT id FROM ft_families", fetch=True)[0]["id"]
+    tok = c.post("/api/agent/enroll", json={"hostname": "kid.example.local", "secret": "enroll"}).json()["token"]
+    run_sql("UPDATE ft_devices SET family_id = $1", fid)
+    h = {"Authorization": f"Bearer {tok}", "X-Real-IP": "10.20.30.70"}
+    c.post("/api/agent/location", headers=h, json={"wifi": [], "session": "active"})
+    did = api["devices"]["kid.example.local"]["id"]
+    assert api["perms"] == {(11, did)}
+    # явный список в семье: папа по логину; маме права забираются
+    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "traccar", "traccar_users": "dad",
+                                       "phone_ids": "82750699\nwg-ivan_ph"})
+    assert "Сохранено" in r.text and "Карта Traccar" in r.text and "wg-ivan_ph" in r.text
+    c.post("/api/agent/location", headers=h, json={"wifi": [], "session": "active"})
+    assert api["perms"] == {(12, did)}
+    # телефон и VPN-устройство семьи — тоже к папе; чужой телефон — никому
+    c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
+    c.get("/osmand?id=wg-ivan_ph&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
+    c.get("/osmand?id=99999&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
+    ph, vpn, other = (api["devices"][k]["id"] for k in ("82750699", "wg-ivan_ph", "99999"))
+    assert {(12, ph), (12, vpn)} <= api["perms"] and not any(d == other for _, d in api["perms"])
+    # телефон семьи получает место из «Известных адресов», как телефоны из общих настроек
+    c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
+    assert osm(calls).url.params["source"] == "known-ip"
