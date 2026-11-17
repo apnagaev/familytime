@@ -17,28 +17,21 @@
     <label class="block"><input type="checkbox" name="jitter" value="1" {{ 'checked' if s.jitter }}> Разбрасывать точки в пределах точности</label>
     <p class="hint">Точка, которую FamilyTime отправляет в Traccar, ставится в случайное место круга с радиусом её точности (не дальше 2 км), чтобы точки одного места не ложились друг на друга. Настоящие координаты хранятся в портале.</p>
 
-    <h2 style="margin-top: 18px">Телефоны с Traccar Client</h2>
-    <p class="hint">Телефоны шлют точки на <code>{{ cfg.public_url }}/osmand</code>, FamilyTime пересылает их в Traccar. Если телефон есть в этом списке и точка пришла с адреса из «Известных адресов», её координаты заменяются местом из таблицы — с разбросом в пределах точности, как у компьютеров (атрибуты <code>source=known-ip</code> и <code>place</code>). С других адресов и от телефонов не из списка точки уходят как есть. Компьютеры по телефонам не уточняются.</p>
-    <label class="block small">Идентификаторы телефонов (как в Traccar Client), по одному на строке</label>
-    <textarea name="phone_ids" style="min-height: 70px; font-family: monospace">{{ s.phone_ids|join('\n') }}</textarea>
-    <p class="small">{% if points_devices %}<a href="/settings/points" target="_blank" rel="noopener">Журнал точек за сутки</a> — {{ points_devices }} устр.: с каких адресов приходили точки телефонов и устройств VPN и какое место им подставлено.{% else %}Журнал точек за сутки пуст.{% endif %}</p>
+    <h2 style="margin-top: 18px">Телефоны и устройства VPN (<code>/osmand</code>)</h2>
+    <p class="hint">Телефоны с Traccar Client и пиры VPN (vpngeo) шлют точки на <code>{{ cfg.public_url }}/osmand</code>, FamilyTime пересылает их в Traccar. Устройства, добавленные хотя бы в одну семью (страница семьи или «Компьютеры» у администратора), обогащаются: место из «Известных адресов» (у VPN — по <code>localip</code>/<code>extip</code>, иначе Яндекс Локатор, иначе город), <code>ip</code>, <code>operator</code>, и показываются на карте пользователей семьи. Остальные — личные, идут транзитом (телефонам дописывается только настоящий <code>ip</code>). Устройства телефонов и VPN FamilyTime в Traccar не создаёт — их заводят вручную.</p>
+    <label class="block small">Префиксы устройств VPN (соединение с сервера WireGuard, место — по адресам из точки), по одному на строке</label>
+    <textarea name="vpn_prefixes" style="min-height: 44px; font-family: monospace">{{ s.vpn_prefixes|join('\n') }}</textarea>
+    <p class="small">{% if points_devices %}<a href="/settings/points" target="_blank" rel="noopener">Журнал точек за сутки</a> — {{ points_devices }} устр.: с каких адресов приходили точки и что FamilyTime с ними сделал.{% else %}Журнал точек за сутки пуст.{% endif %}</p>
 
-    <h2 style="margin-top: 18px">Устройства VPN (vpngeo)</h2>
-    <p class="hint">Точки устройств, чей идентификатор начинается с одного из этих префиксов, приходят на <code>/osmand</code> с сервера WireGuard. Их место FamilyTime определяет по адресам из самой точки: <code>localip</code> (адрес в туннеле) и <code>extip</code> (внешний адрес подключения) — по «Известным адресам», иначе Яндекс Локатор по <code>extip</code>, иначе город по IP. Место по IP хранится месяц. Смещение, сделанное отправителем, не учитывается — разброс как у компьютеров. В точку пишутся <code>ip</code> и <code>operator</code> по <code>extip</code>.</p>
-    <label class="block small">Префиксы, по одному на строке</label>
-    <textarea name="vpn_prefixes" style="min-height: 50px; font-family: monospace">{{ s.vpn_prefixes|join('\n') }}</textarea>
-
-    <h2 style="margin-top: 18px">Группы Traccar</h2>
-    <p class="hint">Устройства, которых ещё нет в Traccar, FamilyTime заводит сам и кладёт в группу (группа создаётся, если её нет; уже существующие устройства переносятся в неё). Пусто — группу не трогать. Группа ищется по имени среди групп владельца токена (чужие одноимённые на общем Traccar не берутся); можно указать и номер группы — его видно в адресе страницы группы в Traccar (<code>/settings/group/12</code>). Нужны токен администратора Traccar и адрес API.</p>
+    <h2 style="margin-top: 18px">Группа Traccar для компьютеров</h2>
+    <p class="hint">Компьютеры с агентом FamilyTime заводит в Traccar сам и кладёт в эту группу (создаётся, если её нет; уже существующие переносятся). Пусто — группу не трогать. Имя ищется среди групп владельца токена; можно указать номер группы (<code>/settings/group/12</code> в адресе). Нужны токен администратора Traccar и адрес API.</p>
     <div class="row">
       <label>Компьютеры <input type="text" name="traccar_group_pc" value="{{ s.traccar_group_pc }}" placeholder="PC"></label>
-      <label>VPN <input type="text" name="traccar_group_vpn" value="{{ s.traccar_group_vpn }}" placeholder="VPN"></label>
-      <label>Телефоны <input type="text" name="traccar_group_phone" value="{{ s.traccar_group_phone }}" placeholder="без группы"></label>
     </div>
 
     <div class="row" style="margin-top: 10px"><button>Сохранить</button></div>
   </form>
-  <p class="hint">Как определяется место: известный адрес → Wi-Fi вокруг (Яндекс Локатор; пока точки и IP те же, прошлое место используется до суток без нового запроса) → без Wi-Fi по внешнему IP, с точностью до города (запоминается на неделю). Действует на все компьютеры всех семей и компаний. Сайты, программы, подписки, простой и предупреждения настраиваются на странице каждого ребёнка, тексты сообщений и чаты Telegram — на странице семьи.</p>
+  <p class="hint">Как определяется место: известный адрес → Wi-Fi вокруг (Яндекс Локатор; пока точки и IP те же, прошлое место используется до суток без нового запроса) → без Wi-Fi по внешнему IP, с точностью до города (запоминается на месяц). Действует на все компьютеры всех семей и компаний. Сайты, программы, подписки, простой и предупреждения настраиваются на странице каждого ребёнка, тексты сообщений и чаты Telegram — на странице семьи.</p>
 </div>
 
 <div class="card" id="ca">

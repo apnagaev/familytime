@@ -301,6 +301,45 @@ async def operator(http, cfg, conn, ip: str) -> str:
     return name
 
 
+async def traccar_device_id(http, cfg, unique_id: str) -> int | None:
+    """Номер существующего устройства Traccar (без создания)."""
+    if not (cfg.traccar_api_url and cfg.traccar_token):
+        return None
+    if unique_id in _device_ids:
+        return _device_ids[unique_id]
+    try:
+        d = await find_traccar_device(http, cfg, unique_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("traccar api: %s", e)
+        return None
+    if d:
+        _device_ids[unique_id] = int(d["id"])
+        return _device_ids[unique_id]
+    return None
+
+
+async def parents_traccar_devices(http, cfg, conn, family_id: int) -> list[dict]:
+    """Устройства Traccar, доступные хотя бы одному родителю семьи (пользователь Traccar
+    находится по логину или почте родителя). Только их родитель может добавить в семью."""
+    if not (cfg.traccar_api_url and cfg.traccar_token):
+        return []
+    rows = await conn.fetch(
+        """SELECT p.username, COALESCE(pe.email, '') AS email FROM ft_family_parents p
+           LEFT JOIN ft_people pe ON pe.username = p.username WHERE p.family_id = $1""", family_id)
+    keys = [x for r in rows for x in (r["username"], r["email"]) if x]
+    ids = match_traccar_users(await traccar_users(http, cfg), keys) if keys else set()
+    h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+    out: dict[str, dict] = {}
+    for uid in sorted(ids):
+        r = await http.get(cfg.traccar_api_url + "/devices", params={"userId": uid},
+                           headers=h, timeout=20)
+        items = r.json() if r.status_code == 200 else []
+        for d in items if isinstance(items, list) else []:
+            if isinstance(d, dict) and d.get("uniqueId"):
+                out.setdefault(str(d["uniqueId"]).lower(), d)
+    return sorted(out.values(), key=lambda d: str(d.get("name") or d.get("uniqueId")).lower())
+
+
 async def traccar_users(http, cfg) -> list[dict]:
     """Пользователи Traccar (нужен токен администратора), список хранится 5 минут."""
     import time as _t

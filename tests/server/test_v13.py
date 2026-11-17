@@ -59,6 +59,13 @@ def env():
         yield c, calls
 
 
+def family_device(uid, family="Семья"):
+    """Устройство /osmand — в семью (обогащаются только такие)."""
+    fid = run_sql("INSERT INTO ft_families (name) VALUES ($1) RETURNING id", family, fetch=True)[0]["id"]
+    run_sql("INSERT INTO ft_family_traccar (unique_id, family_id) VALUES ($1, $2)", uid, fid)
+    return fid
+
+
 def login(c, user, admin=False, parent=True, host="kids.example.com"):
     c.cookies.clear()
     c.get(f"/dev-login?u={user}&parent={'1' if parent else ''}&admin={'1' if admin else ''}",
@@ -145,9 +152,10 @@ def test_traccar_client_points(env):
     c, calls = env
     t = login(c, "root", admin=True)
     c.post("/settings", data={"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2",
-                              "phone_ids": "my-phone", "jitter": "",
+                              "jitter": "",
                               "ip_locations": "10.20.30.0/24 55.75 37.61 40 Дом\n"
                                               "95.31.1.0/24 55.70 37.50 100 Дача"})
+    family_device("my-phone")
 
     def last():
         return [x for x in calls if x.url.host == "traccar"][-1]
@@ -195,7 +203,7 @@ def test_traccar_client_points(env):
     page = c.get("/settings").text
     assert 'href="/settings/points"' in page and "<td>my-phone</td>" not in page
     page = c.get("/settings/points").text
-    assert "my-phone" in page and "stranger" not in page and "Дом" in page
+    assert "my-phone" in page and "Дом" in page and "транзит" in page
     assert "my-phone" not in c.get("/settings/points?q=nothing").text
     h = enroll(c)
     r = c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.88"}, json={
@@ -600,7 +608,8 @@ def test_operator_attribute(env):
     c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.5"},
            json={"wifi": [], "session": "active"})
     assert "operator" not in osm().url.params
-    # телефон: GET и JSON; только «as» — без номера автономной системы
+    # телефон семьи: GET и JSON; только «as» — без номера автономной системы
+    family_device("ph")
     c.get("/osmand?id=ph&lat=1&lon=2", headers={"X-Real-IP": "95.31.1.20"})
     assert osm().url.params["operator"] == "Test Telecom"
     body = {"device_id": "ph", "location": {"coords": {"latitude": 1, "longitude": 2}}}
@@ -616,3 +625,22 @@ def test_traccar_accuracy_for_ip_locations():
     assert t("yandex-wifi", 25) == 25 and t("known-ip", 40, "Дом") == 40
     assert t("geoip", 10000, "Москва") == 1 and t("geoip", 10000, "") == 2
     assert t("yandex-ip", 8000) == 1 and t("yandex-ip", 400000) == 2
+
+
+def test_personal_devices_transit(env):
+    """Устройство не из семьи — транзитом: без подмены места и operator, только настоящий ip."""
+    c, calls = env
+    t = login(c, "root", admin=True)
+    c.post("/settings", data={"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2",
+                              "jitter": "", "vpn_prefixes": "wg-",
+                              "ip_locations": "10.20.30.0/24 55.75 37.61 40 Дом"})
+    c.get("/osmand?id=mine&lat=1&lon=2&ip=6.6.6.6", headers={"X-Real-IP": "10.20.30.50"})
+    q = [x for x in calls if x.url.host == "traccar"][-1].url.params
+    assert q["lat"] == "1" and "source" not in q and "operator" not in q
+    assert q.get_list("ip") == ["10.20.30.50"]
+    # VPN не из семьи — совсем как есть (ip и прочее — от vpngeo)
+    c.get("/osmand?id=wg-x&lat=1&lon=2&ip=9.9.9.9&extip=95.31.1.20&localip=10.20.30.5",
+          headers={"X-Real-IP": "10.20.40.5"})
+    q = [x for x in calls if x.url.host == "traccar"][-1].url.params
+    assert q["lat"] == "1" and q["ip"] == "9.9.9.9" and "operator" not in q
+    assert "транзит" in c.get("/settings/points").text

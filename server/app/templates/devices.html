@@ -45,6 +45,26 @@
 {% else %}
 <div class="card muted">Компьютеров пока нет. {% if user.admin %}Установите агент — компьютер появится здесь после первого выхода на связь.{% else %}Компьютер появится здесь, когда на нём с установленным агентом войдёт ваш ребёнок или администратор привяжет его к вашей семье.{% endif %}</div>
 {% endfor %}
+{% if user.admin and osmand_devices %}
+<div class="card" id="osmand">
+  <h2>Телефоны и устройства VPN</h2>
+  <p class="hint">Устройства, которые шлют точки на <code>/osmand</code> (за двое суток), и уже добавленные в семьи. Устройство в семье видят на карте Traccar её пользователи, его точки FamilyTime обогащает; остальные — личные и идут транзитом. Сами устройства заводятся в Traccar вручную.</p>
+  <div class="scroll"><table class="small">
+    <tr><th>Устройство</th><th>Последняя точка</th><th>Семьи</th><th>Добавить в семью</th></tr>
+    {% for d in osmand_devices %}
+    <tr>
+      <td><code>{{ d.uid }}</code>{% if d.name %} {{ d.name }}{% endif %}</td>
+      <td>{{ d.at.astimezone(cfg.tz).strftime('%d.%m %H:%M') if d.at else '—' }}</td>
+      <td>{% for fid in d.families %}<form method="post" action="/devices/osmand" class="inline"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="unique_id" value="{{ d.uid }}"><input type="hidden" name="family_id" value="{{ fid }}"><input type="hidden" name="action" value="remove"><span class="pill">{{ fam_names.get(fid, fid) }} <button class="ghost small" title="Убрать из семьи" style="padding: 0 4px">×</button></span></form> {% else %}<span class="muted">личное</span>{% endfor %}</td>
+      <td><form method="post" action="/devices/osmand" class="inline row"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="unique_id" value="{{ d.uid }}">
+        <select name="family_id" style="width: auto; min-width: 0">{% for f in families if f.id not in d.families %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}</select>
+        <button class="ghost small">Добавить</button></form></td>
+    </tr>
+    {% endfor %}
+  </table></div>
+</div>
+{% endif %}
+
 <div class="card" id="install">
   <h2>Установить на компьютер вне домена</h2>
   {% if not agent_meta %}
