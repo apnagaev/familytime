@@ -68,7 +68,7 @@ def env():
     cfg = Config(database_url=DSN, public_url="https://kids.example.com", session_secret="s" * 32,
                  enroll_secret="enroll", dev_login=True, oidc_issuer="https://sso.example.com/r",
                  yandex_locator_keys=["k"], traccar_osmand_url="http://traccar:5055",
-                 geoip_url="http://geoip.example/json/{ip}")
+                 geoip_url="http://geoip.example/json/{ip}", operator_url="")
     app = create_app(cfg)
     with TestClient(app, base_url="https://kids.example.com") as c:
         app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))

@@ -17,6 +17,7 @@
     familytime_oidc_username_claim: preferred_username
     familytime_yandex_locator_keys: ""
     familytime_geoip_url: "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"
+    familytime_operator_url: "http://ip-api.com/json/{ip}?fields=status,isp,org,as"
     familytime_ext_ip_url: "http://ip-api.com/json/?fields=status,query,lat,lon,city"
     familytime_osmand_forward_url: ""
     familytime_company_hosts: ""

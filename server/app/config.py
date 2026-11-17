@@ -37,6 +37,7 @@ class Config:
     yandex_locator_url: str = "https://locator.api.maps.yandex.ru/v1/locate"
     # место по IP, когда Wi-Fi нет; {ip} подставляется; пусто — не использовать
     geoip_url: str = "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"
+    operator_url: str = "http://ip-api.com/json/{ip}?fields=status,isp,org,as"
     # где агент узнаёт свой внешний адрес (и место по нему); пусто — не узнавать
     ext_ip_url: str = "http://ip-api.com/json/?fields=status,query,lat,lon,city"
     # пересылать точки Traccar Client, принятые на /osmand, сюда (по умолчанию TRACCAR_OSMAND_URL)
@@ -81,6 +82,8 @@ class Config:
                 "YANDEX_LOCATOR_URL", "https://locator.api.maps.yandex.ru/v1/locate"),
             geoip_url=os.environ.get(
                 "GEOIP_URL", "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"),
+            operator_url=os.environ.get(
+                "OPERATOR_URL", "http://ip-api.com/json/{ip}?fields=status,isp,org,as"),
             ext_ip_url=os.environ.get(
                 "EXT_IP_URL", "http://ip-api.com/json/?fields=status,query,lat,lon,city"),
             osmand_forward_url=os.environ.get("OSMAND_FORWARD_URL", "").rstrip("/"),

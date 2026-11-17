@@ -39,6 +39,14 @@ def env():
         calls.append(req)
         if req.url.host == "traccar":
             return httpx.Response(200, text="ok")
+        if req.url.host == "ip-api.com" and "isp" in str(req.url):
+            ip = req.url.path.rsplit("/", 1)[-1]
+            if ip == "95.31.1.20":
+                return httpx.Response(200, json={"status": "success", "isp": "Test Telecom",
+                                                 "org": "Org", "as": "AS1 X"})
+            if ip == "8.8.4.4":
+                return httpx.Response(200, json={"status": "success", "as": "AS15169 Google LLC"})
+            return httpx.Response(200, json={"status": "fail"})
         return httpx.Response(404)
 
     cfg = Config(database_url=DSN, public_url="https://kids.example.com", session_secret="s" * 32,
@@ -159,7 +167,8 @@ def test_traccar_client_points(env):
     c.post("/osmand", json=body, headers={"X-Real-IP": "95.31.1.20"})
     j = json.loads(last().content)
     assert j["location"]["coords"] == {"latitude": 55.7, "longitude": 37.5, "accuracy": 100}
-    assert j["location"]["extras"] == {"source": "known-ip", "place": "Дача", "ip": "95.31.1.20"}
+    assert j["location"]["extras"] == {"source": "known-ip", "place": "Дача", "ip": "95.31.1.20",
+                                       "operator": "Test Telecom"}
     # форма
     c.post("/osmand", data={"id": "my-phone", "lat": "1", "lon": "2", "accuracy": "5"},
            headers={"X-Real-IP": "10.20.30.7"})
@@ -562,3 +571,38 @@ def test_trusted_ca(env):
     c.post(f"/settings/ca/{sha}/delete", data={"csrf": ta})
     dev = c.post("/api/agent/heartbeat", headers=h, json={"seq": 2, "caps": ["userlists"]}).json()["device"]
     assert len(dev["trusted_ca"]) == 1 and dev["trusted_ca"][0]["root"] is False
+
+
+def test_operator_attribute(env):
+    c, calls = env
+    t = login(c, "root", admin=True)
+    c.post("/settings", data={"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2",
+                              "phone_ids": "", "jitter": "",
+                              "ip_locations": "10.20.30.0/24 55.75 37.61 40 Дом"})
+    h = enroll(c)
+
+    def osm():
+        return [x for x in calls if x.url.host == "traccar"][-1]
+    # ноутбук: внешний адрес от агента → operator в точке и на странице компьютеров
+    c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.5"},
+           json={"wifi": [], "session": "active", "ext_ip": "95.31.1.20"})
+    assert osm().url.params["operator"] == "Test Telecom"
+    assert "Test Telecom" in c.get("/devices").text
+    # второй раз — из кеша, без запроса к службе
+    n = len([x for x in calls if x.url.host == "ip-api.com"])
+    c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.5"},
+           json={"wifi": [], "session": "active", "ext_ip": "95.31.1.20"})
+    assert len([x for x in calls if x.url.host == "ip-api.com"]) == n
+    # нет внешнего адреса — нет operator
+    c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.5"},
+           json={"wifi": [], "session": "active"})
+    assert "operator" not in osm().url.params
+    # телефон: GET и JSON; только «as» — без номера автономной системы
+    c.get("/osmand?id=ph&lat=1&lon=2", headers={"X-Real-IP": "95.31.1.20"})
+    assert osm().url.params["operator"] == "Test Telecom"
+    body = {"device_id": "ph", "location": {"coords": {"latitude": 1, "longitude": 2}}}
+    c.post("/osmand", json=body, headers={"X-Real-IP": "8.8.4.4"})
+    assert json.loads(osm().content)["location"]["extras"] == {"ip": "8.8.4.4", "operator": "Google LLC"}
+    # служба не знает адрес — атрибута нет, точка уходит
+    c.get("/osmand?id=ph&lat=1&lon=2", headers={"X-Real-IP": "1.2.3.4"})
+    assert "operator" not in osm().url.params and osm().url.params["ip"] == "1.2.3.4"

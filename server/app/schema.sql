@@ -214,3 +214,11 @@ CREATE TABLE IF NOT EXISTS ft_install_codes (
     last_used  timestamptz,
     revoked    boolean NOT NULL DEFAULT false
 );
+
+-- 1.4.5: оператор (провайдер) по внешнему адресу — атрибут operator в Traccar
+CREATE TABLE IF NOT EXISTS ft_ip_operator (
+    ip         text PRIMARY KEY,
+    operator   text NOT NULL DEFAULT '',
+    fetched_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE ft_devices ADD COLUMN IF NOT EXISTS last_operator text NOT NULL DEFAULT '';

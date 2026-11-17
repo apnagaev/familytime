@@ -234,6 +234,48 @@ async def resolve(http, cfg, conn, settings: dict, dev, wifi, ip: str, ext_ip: s
 JITTER_MAX = 2000.0       # м: дальше не разбрасываем, даже если точность хуже (место по IP)
 
 
+OPERATOR_TTL = timedelta(days=7)       # провайдер адреса меняется редко
+OPERATOR_FAIL_TTL = timedelta(hours=6)  # не узнали — не спрашиваем снова какое-то время
+
+
+def operator_name(d: dict) -> str:
+    """Название провайдера из ответа ip-api.com (isp, иначе org, иначе as без номера)."""
+    for k in ("isp", "org", "operator", "provider"):
+        v = str(d.get(k) or "").strip()
+        if v:
+            return v[:80]
+    asn = str(d.get("as") or "").strip()
+    return re.sub(r"^AS\d+\s+", "", asn)[:80]
+
+
+async def operator(http, cfg, conn, ip: str) -> str:
+    """Провайдер по внешнему адресу; внутренние адреса — пусто. Ответ запоминается в базе
+    на неделю (неудача — на 6 часов), чтобы не упираться в лимиты службы."""
+    ip = public_ip(ip)
+    if not ip or not cfg.operator_url:
+        return ""
+    row = await conn.fetchrow("SELECT operator, fetched_at FROM ft_ip_operator WHERE ip = $1", ip)
+    now = datetime.now(timezone.utc)
+    if row and now - row["fetched_at"] < (OPERATOR_TTL if row["operator"] else OPERATOR_FAIL_TTL):
+        return row["operator"]
+    name = ""
+    try:
+        r = await http.get(cfg.operator_url.replace("{ip}", ip), timeout=5,
+                           headers={"User-Agent": "familytime/1.0"})
+        d = r.json() if r.status_code == 200 else {}
+        if isinstance(d, dict) and d.get("status") != "fail":
+            name = operator_name(d)
+    except (httpx.HTTPError, ValueError) as e:
+        log.info("оператор для %s: %s", ip, e)
+    if not name and row and row["operator"]:
+        name = row["operator"]                     # служба не ответила — прежнее значение
+    await conn.execute(
+        """INSERT INTO ft_ip_operator (ip, operator, fetched_at) VALUES ($1, $2, $3)
+           ON CONFLICT (ip) DO UPDATE SET operator = EXCLUDED.operator, fetched_at = EXCLUDED.fetched_at""",
+        ip, name, now)
+    return name
+
+
 def jitter(lat: float, lon: float, radius: float, rnd: random.Random | None = None) -> tuple[float, float]:
     """Случайная точка внутри круга радиусом radius метров, равномерно по площади,
     чтобы точки одного места не ложились друг на друга."""
@@ -248,7 +290,8 @@ def jitter(lat: float, lon: float, radius: float, rnd: random.Random | None = No
     return lat + dlat, lon + dlon
 
 
-def osmand_params(dev, fix: Fix, body, ip: str, now: datetime, spread: bool = True) -> dict:
+def osmand_params(dev, fix: Fix, body, ip: str, now: datetime, spread: bool = True,
+                  operator: str = "") -> dict:
     """Параметры OsmAnd (https://www.traccar.org/osmand/).
 
     Имена wifi и cell у Traccar зарезервированы под формат «MAC,сигнал» — число точек идёт
@@ -277,6 +320,8 @@ def osmand_params(dev, fix: Fix, body, ip: str, now: datetime, spread: bool = Tr
         p["extip"] = ext
     if ip:
         p["localIP"] = ip
+    if operator:
+        p["operator"] = operator
     if body.battery is not None:
         p["batt"] = body.battery
     if body.on_ac is not None:
@@ -291,10 +336,11 @@ def osmand_params(dev, fix: Fix, body, ip: str, now: datetime, spread: bool = Tr
 
 
 async def send_osmand(http, cfg, dev, fix: Fix, body, ip: str, now: datetime,
-                      spread: bool = True) -> bool:
+                      spread: bool = True, operator: str = "") -> bool:
     try:
         r = await http.get(cfg.traccar_osmand_url + "/",
-                           params=osmand_params(dev, fix, body, ip, now, spread), timeout=10)
+                           params=osmand_params(dev, fix, body, ip, now, spread, operator),
+                           timeout=10)
         if r.status_code >= 400:
             log.warning("traccar osmand: HTTP %s", r.status_code)
         return r.status_code < 400
