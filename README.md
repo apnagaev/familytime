@@ -136,9 +136,14 @@ Telegram опрашивает один узел (advisory lock), второй п
 На любом компьютере с Python 3.12 x64:
 ```powershell
 cd agent
-.\build.ps1          # → dist\FamilyTime-1.0.0.zip
+.\build.ps1          # → dist\FamilyTime-<версия>.zip
 ```
-Или GitHub Actions (`.github/workflows/agent.yml`): тесты на Linux и сборка на `windows-latest`, архив — в артефактах прогона.
+Или GitHub Actions (`.github/workflows/agent.yml`): тесты на Linux и сборка на `windows-latest`. Результат — сразу `FamilyTime-<версия>.zip`, без архива вокруг, его можно загружать на портал как есть:
+
+- **Releases:** при новой версии агента в `main` (поменялся `VERSION` в `agent/familytime_agent/__init__.py`) создаётся выпуск `agent-v<версия>`. Скачивается без входа в GitHub, последняя версия — всегда по ссылке `https://github.com/apnagaev/familytime/releases/latest/download/FamilyTime-agent.zip`.
+- **Артефакт прогона** — для любой ветки и коммита (нужен вход в GitHub).
+
+Сертификатов из `agent/certs/` в сборке GitHub нет — загрузите их на портал («Доверенные сертификаты») или положите в подпапку `certs` папки GPO.
 
 В архиве: папка `FamilyTime` (`familytime-agent.exe` — служба, `familytime-helper.exe` — помощник), `install.ps1`, `uninstall.ps1`, `familytime.example.json`.
 
