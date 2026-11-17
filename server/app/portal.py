@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
@@ -675,8 +676,13 @@ async def family_page(request: Request):
         kids = await db.list_children(conn, families=fams)
         orphans = [c for c in await db.list_children(conn) if c["family_id"] is None] \
             if u.admin else []
+        fdevs: dict[int, list] = {}
+        for r in await conn.fetch(
+                "SELECT * FROM ft_family_devices WHERE family_id = ANY($1::bigint[]) "
+                "ORDER BY added_at", fams):
+            fdevs.setdefault(r["family_id"], []).append(r)
     return page(request, "family.html", u, families=families, kids=kids, orphans=orphans,
-                msg=policy.family_messages)
+                msg=policy.family_messages, fdevs=fdevs)
 
 
 @router.post("/families")
@@ -720,11 +726,37 @@ async def family_save(request: Request, family_id: int):
                                family_id, chats[:10])
         elif section == "traccar":
             users = [x for x in re.split(r"[\s,;]+", str(form.get("traccar_users", "")).strip()) if x][:50]
-            phones = [x.lower() for x in re.split(r"[\s,;]+", str(form.get("phone_ids", "")).strip())
-                      if x][:100]
-            await conn.execute("UPDATE ft_families SET traccar_users = $2, phone_ids = $3 WHERE id = $1",
-                               family_id, users, phones)
+            await conn.execute("UPDATE ft_families SET traccar_users = $2 WHERE id = $1",
+                               family_id, users)
             locator._linked.clear()        # пересчитать права при следующих точках
+        elif section == "device_new":
+            # новый случайный идентификатор: его знает только эта семья, чужое устройство так
+            # не привязать (в отличие от ввода готового идентификатора)
+            name = str(form.get("name", "")).strip()[:60] or "Телефон"
+            uid = "".join(secrets.choice("0123456789") for _ in range(12))
+            await conn.execute(
+                "INSERT INTO ft_family_devices (unique_id, family_id, name, added_by) "
+                "VALUES ($1, $2, $3, $4)", uid, family_id, name, u.username)
+            return back("/family", ok=f"Идентификатор для «{name}»: {uid} — впишите его в Traccar Client")
+        elif section == "device_bind":
+            if not u.admin:
+                raise HTTPException(403, "Готовый идентификатор привязывает только администратор")
+            uid = str(form.get("unique_id", "")).strip().lower()[:100]
+            if not uid:
+                return back("/family", err="Укажите идентификатор устройства")
+            other = await conn.fetchval("SELECT family_id FROM ft_family_devices WHERE unique_id = $1", uid)
+            if other and other != family_id:
+                return back("/family", err="Это устройство уже в другой семье — сначала уберите его там")
+            await conn.execute(
+                """INSERT INTO ft_family_devices (unique_id, family_id, name, added_by)
+                   VALUES ($1, $2, $3, $4) ON CONFLICT (unique_id) DO UPDATE SET name = EXCLUDED.name""",
+                uid, family_id, str(form.get("name", "")).strip()[:60], u.username)
+            locator._linked.pop(uid, None)
+        elif section == "device_remove":
+            uid = str(form.get("unique_id", "")).strip().lower()
+            await conn.execute("DELETE FROM ft_family_devices WHERE unique_id = $1 AND family_id = $2",
+                               uid, family_id)
+            locator._linked.pop(uid, None)
         elif section == "add_parent":
             login = norm_login(str(form.get("parent", "")))
             if not login:

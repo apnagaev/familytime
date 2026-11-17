@@ -69,18 +69,41 @@
     <p class="hint">Запросы детей этой семьи приходят в эти чаты с кнопками «Дать» и «Отказать». Свой id подскажет бот @userinfobot; боту FamilyTime нужно сначала написать /start.</p>
   </form>
 
-  <form method="post" action="/family/{{ f.id }}" style="margin-top: 12px">
+  <label class="block" style="margin-top: 12px">Карта Traccar</label>
+  <form method="post" action="/family/{{ f.id }}">
     <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="traccar">
-    <label class="block">Карта Traccar</label>
+    <label class="small block">Кому показывать устройства семьи (почта или логин в Traccar, по одному на строке)</label>
     <div class="row">
-      <label class="small" style="flex: 1; min-width: 220px">Кому показывать устройства (почта или логин в Traccar)
-        <textarea name="traccar_users" style="min-height: 50px; font-family: monospace" placeholder="пусто — родители семьи по почте из Keycloak">{{ f.traccar_users|join('\n') }}</textarea></label>
-      <label class="small" style="flex: 1; min-width: 220px">Телефоны и устройства VPN семьи (идентификаторы)
-        <textarea name="phone_ids" style="min-height: 50px; font-family: monospace" placeholder="например 82750699 или wg-ivan_ph">{{ f.phone_ids|join('\n') }}</textarea></label>
+      <textarea name="traccar_users" style="min-height: 44px; font-family: monospace; flex: 1; min-width: 220px" placeholder="пусто — родители семьи по почте из Keycloak">{{ f.traccar_users|join('\n') }}</textarea>
+      <button class="ghost">Сохранить</button>
     </div>
-    <div class="row"><button class="ghost">Сохранить</button></div>
-    <p class="hint">Компьютеры семьи и перечисленные телефоны и устройства VPN FamilyTime сам добавляет на карту этих пользователей Traccar (выдаёт права на устройство; группы не нужны). Уберёте человека или устройство из списка — FamilyTime заберёт выданные им права. Права, выданные в Traccar вручную, не трогаются. Телефоны из этого списка, кроме того, получают место из «Известных адресов», как телефоны из общих настроек.</p>
   </form>
+  {% set devs = fdevs.get(f.id, []) %}
+  <label class="small block" style="margin-top: 8px">Телефоны и другие устройства семьи</label>
+  {% if devs %}
+  <table class="small">
+    <tr><th>Название</th><th>Идентификатор</th><th>Добавил</th><th></th></tr>
+    {% for d in devs %}
+    <tr><td>{{ d.name or '—' }}</td><td><code>{{ d.unique_id }}</code></td><td>{{ d.added_by }} · {{ d.added_at.astimezone(cfg.tz).strftime('%d.%m.%Y') }}</td>
+      <td><form method="post" action="/family/{{ f.id }}" class="inline" onsubmit="return confirm('Убрать устройство из семьи? Его перестанут видеть на карте пользователи семьи.')"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="device_remove"><input type="hidden" name="unique_id" value="{{ d.unique_id }}"><button class="ghost small">Убрать</button></form></td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  <form method="post" action="/family/{{ f.id }}" class="row" style="margin-top: 6px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="device_new">
+    <input type="text" name="name" placeholder="название, например «Телефон Вани»" maxlength="60" style="flex: 1; min-width: 200px">
+    <button>Добавить телефон</button>
+  </form>
+  <p class="hint">FamilyTime выдаст новый идентификатор. В Traccar Client на телефоне: «Идентификатор устройства» — этот номер, «Адрес сервера» — <code>{{ cfg.public_url }}/osmand</code>. Телефон появится на карте пользователей семьи после первой точки. Ввести готовый идентификатор родитель не может: так нельзя подключить к своей карте чужое устройство.</p>
+  {% if user.admin %}
+  <form method="post" action="/family/{{ f.id }}" class="row" style="margin-top: 6px">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="device_bind">
+    <input type="text" name="unique_id" placeholder="готовый идентификатор: 82750699, wg-ivan_ph" maxlength="100" style="font-family: monospace">
+    <input type="text" name="name" placeholder="название" maxlength="60">
+    <button class="ghost">Привязать (администратор)</button>
+  </form>
+  <p class="hint">Только администратор: привязать уже работающее устройство (телефон со старым идентификатором, пир VPN). Убедитесь, что устройство действительно этой семьи — его увидят все её пользователи Traccar.</p>
+  {% endif %}
 
   {% if user.admin %}
   <form method="post" action="/family/{{ f.id }}" onsubmit="return confirm('Удалить семью? Дети и компьютеры останутся без семьи.')" style="margin-top: 8px">

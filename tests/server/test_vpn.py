@@ -115,6 +115,12 @@ def login(c):
     return re.search(r'name="csrf" value="([^"]+)"', page).group(1)
 
 
+def login_as(c, user, email=""):
+    c.cookies.clear()
+    c.get(f"/dev-login?u={user}&parent=1&email={email}", follow_redirects=False)
+    return re.search(r'name="csrf" value="([^"]+)"', c.get("/dashboard").text).group(1)
+
+
 def save_settings(c, t, **extra):
     data = {"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2", "jitter": "",
             "phone_ids": "", "vpn_prefixes": "wg-\nvpn_", "traccar_group_pc": "PC",
@@ -246,17 +252,31 @@ def test_family_devices_on_family_users_map(env):
     did = api["devices"]["kid.example.local"]["id"]
     assert api["perms"] == {(11, did)}
     # явный список в семье: папа по логину; маме права забираются
-    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "traccar", "traccar_users": "dad",
-                                       "phone_ids": "82750699\nwg-ivan_ph"})
-    assert "Сохранено" in r.text and "Карта Traccar" in r.text and "wg-ivan_ph" in r.text
+    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "traccar", "traccar_users": "dad"})
+    assert "Сохранено" in r.text and "Карта Traccar" in r.text
     c.post("/api/agent/location", headers=h, json={"wifi": [], "session": "active"})
     assert api["perms"] == {(12, did)}
-    # телефон и VPN-устройство семьи — тоже к папе; чужой телефон — никому
-    c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
+    # родитель не может привязать готовый (чужой) идентификатор — только получить новый
+    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_bind", "unique_id": "99999"})
+    assert r.status_code == 403
+    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_new", "name": "Телефон Вани"})
+    phone = re.search(r"Идентификатор для «Телефон Вани»: (\d{12})", r.text).group(1)
+    assert phone in c.get("/family").text
+    # администратор привязывает существующее устройство VPN
+    ta = login(c)
+    c.post(f"/family/{fid}", data={"csrf": ta, "section": "device_bind", "unique_id": "wg-ivan_ph",
+                                   "name": "VPN Вани"})
+    c.get(f"/osmand?id={phone}&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
     c.get("/osmand?id=wg-ivan_ph&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
     c.get("/osmand?id=99999&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
-    ph, vpn, other = (api["devices"][k]["id"] for k in ("82750699", "wg-ivan_ph", "99999"))
+    ph, vpn, other = (api["devices"][k]["id"] for k in (phone, "wg-ivan_ph", "99999"))
+    assert api["devices"][phone]["name"] == "Телефон Вани"
     assert {(12, ph), (12, vpn)} <= api["perms"] and not any(d == other for _, d in api["perms"])
+    # убрать из семьи — права забираются при следующей точке
+    tm2 = login_as(c, "mom", "mom@example.com")
+    c.post(f"/family/{fid}", data={"csrf": tm2, "section": "device_remove", "unique_id": "wg-ivan_ph"})
+    c.get("/osmand?id=wg-ivan_ph&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
+    assert (12, vpn) not in api["perms"]
     # телефон семьи получает место из «Известных адресов», как телефоны из общих настроек
-    c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
+    c.get(f"/osmand?id={phone}&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
     assert osm(calls).url.params["source"] == "known-ip"
