@@ -1,30 +1,73 @@
 name: agent
 
+# Тесты и сборка агента. Результат — FamilyTime-<версия>.zip, готовый к загрузке на портал
+# (общие настройки → «Программа для компьютеров вне домена») и в папку GPO:
+# - артефакт сборки — сам этот zip, без архива вокруг;
+# - при новой версии в main — выпуск agent-v<версия> в Releases, скачивается без входа в GitHub:
+#   https://github.com/<владелец>/<репозиторий>/releases/latest/download/FamilyTime-agent.zip
+
 on:
   push:
     paths: ["agent/**", ".github/workflows/agent.yml"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: {python-version: "3.12"}
       - run: pip install pytest && python -m pytest -q tests/agent
 
   build:
     needs: test
     runs-on: windows-latest
+    permissions:
+      contents: write          # выпуск в Releases
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: {python-version: "3.12", architecture: x64}
       - name: build
         shell: pwsh
         run: ./agent/build.ps1
-      - uses: actions/upload-artifact@v4
+      - name: version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path agent/familytime_agent/__init__.py -Pattern 'VERSION = "(.+)"').Matches[0].Groups[1].Value
+          $zip = "agent/dist/FamilyTime-$v.zip"
+          if (-not (Test-Path $zip)) { throw "нет $zip" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+      # сам zip, а не архив с ним внутри: скачанный файл сразу загружается на портал
+      - uses: actions/upload-artifact@v7
         with:
-          name: FamilyTime-agent
-          path: agent/dist/FamilyTime-*.zip
+          path: ${{ steps.ver.outputs.zip }}
+          archive: false
+      - name: release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.ver.outputs.version }}
+          ZIP: ${{ steps.ver.outputs.zip }}
+        run: |
+          $tag = "agent-v$env:VER"
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { Write-Host "$tag уже выпущен — версия не менялась"; exit 0 }
+          Copy-Item $env:ZIP agent/dist/FamilyTime-agent.zip
+          $notes = @"
+          Агент FamilyTime $env:VER для Windows 10/11 x64.
+
+          - **FamilyTime-$env:VER.zip** — загрузить на портал: общие настройки → «Программа для компьютеров вне домена». Агенты 1.4.2+ обновятся сами; на компьютерах вне домена можно запустить установщик с портала.
+          - Для GPO: распаковать в общую папку; свои сертификаты центров — в подпапку ``certs``.
+          - **FamilyTime-agent.zip** — то же самое под постоянным именем для ссылки на последнюю версию.
+
+          Сборка из коммита $env:GITHUB_SHA.
+          "@
+          gh release create $tag $env:ZIP agent/dist/FamilyTime-agent.zip --title "Агент $env:VER" --notes $notes --target $env:GITHUB_SHA --latest
