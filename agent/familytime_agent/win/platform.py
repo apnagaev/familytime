@@ -445,11 +445,38 @@ def self_update(url: str, sha256: str, version: str) -> None:
     log_path = os.path.join(base, "run.log")
     with open(run, "w", encoding="ascii", errors="replace", newline="\r\n") as f:
         f.write("@echo off\n")
-        f.write(f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{script}" '
-                f'-Source "{dest}" > "{log_path}" 2>&1\n')
+        # как задание GPO: текст сценария через scriptblock — политика выполнения скриптов,
+        # заданная групповой политикой, его не блокирует (в отличие от -File)
+        f.write("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+                f"\"& ([scriptblock]::Create((Get-Content -LiteralPath '{script}' -Raw -Encoding UTF8))) "
+                f"-Source '{dest}'\" > \"{log_path}\" 2>&1\n")
+    _start_detached(run)
+
+
+def _start_detached(run: str) -> None:
+    """Запустить установщик так, чтобы он пережил остановку этой службы.
+
+    Основной путь — отдельный процесс вне группы и задания службы (SCM дочерние процессы
+    при остановке службы не завершает). Если Windows не даёт выйти из задания — задание
+    планировщика от SYSTEM. 1.4.0 пользовалась только schtasks /Create /SC ONCE /ST 00:00,
+    и на части компьютеров оно не создавалось (код 1), поэтому обновление не запускалось."""
+    cmd = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"), "/c", run]
+    base = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            | 0x00000008)                                  # DETACHED_PROCESS
+    for extra in (0x01000000, 0):                         # CREATE_BREAKAWAY_FROM_JOB, без него
+        try:
+            subprocess.Popen(cmd, creationflags=base | extra, close_fds=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, cwd=os.path.dirname(run))
+            log.info("установщик обновления запущен отдельным процессом")
+            return
+        except OSError as e:
+            log.info("отдельный процесс (флаги %#x): %s", base | extra, e)
     flags = subprocess.CREATE_NO_WINDOW
-    subprocess.run(["schtasks", "/Create", "/F", "/TN", UPDATE_TASK, "/TR", run, "/SC", "ONCE",
-                    "/ST", "00:00", "/RU", "SYSTEM", "/RL", "HIGHEST"],
-                   check=True, capture_output=True, creationflags=flags, timeout=60)
-    subprocess.run(["schtasks", "/Run", "/TN", UPDATE_TASK],
-                   check=True, capture_output=True, creationflags=flags, timeout=60)
+    for args in (["schtasks", "/Create", "/F", "/TN", UPDATE_TASK, "/TR", run, "/SC", "ONCE",
+                  "/ST", "23:59", "/RU", "SYSTEM", "/RL", "HIGHEST"],
+                 ["schtasks", "/Run", "/TN", UPDATE_TASK]):
+        r = subprocess.run(args, capture_output=True, creationflags=flags, timeout=60)
+        if r.returncode != 0:
+            out = (r.stdout + r.stderr).decode("cp866", "replace").strip()
+            raise RuntimeError(f"{args[1]}: код {r.returncode}: {out[:300]}")
