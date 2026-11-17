@@ -277,9 +277,12 @@ def test_family_devices_only_from_parents(env):
     api["devices"]["wg-peer"] = {"id": 50, "uniqueId": "wg-peer", "name": "Пир VPN", "_linked": False}
     locator._all_devices.update(at=float("-inf"), by_uid={})
     ta = login(c)
-    page = c.get("/family").text
-    assert "Телефоны и устройства VPN по семьям" in page and "<code>99999</code>" in page
+    assert "Устройства Traccar всех семей" in c.get("/family").text and "Добавить в семью" not in c.get("/family").text
+    page = c.get("/traccar").text
+    assert "Компьютеры с агентом" in page and "<code>99999</code>" in page
     assert "<code>wg-peer</code> Пир VPN" in page and "<option value=\"%d\"" % fid in page
+    agents, others = page.split("Остальные устройства Traccar")
+    assert "<code>kid.example.local</code>" in agents and "kid.example.local" not in others
     r = c.post("/devices/osmand", data={"csrf": ta, "unique_id": "99999", "family_id": str(fid)})
     assert "Сохранено" in r.text
     assert run_sql("SELECT family_id FROM ft_family_traccar WHERE unique_id='99999'", fetch=True)
@@ -291,6 +294,21 @@ def test_family_devices_only_from_parents(env):
     for f in (fid, fid2):
         c.post("/devices/osmand", data={"csrf": ta, "unique_id": "99999", "family_id": str(f)})
     assert len(run_sql("SELECT 1 FROM ft_family_traccar WHERE unique_id='99999'", fetch=True)) == 2
+    # компьютер с агентом — ещё и на карту другой семьи
+    run_sql("INSERT INTO ft_family_parents VALUES ($1, 'stranger')", fid2)
+    api["users"].append({"id": 77, "login": "stranger", "email": ""})
+    locator._users.update(at=float("-inf"), items=[])
+    c.post("/devices/osmand", data={"csrf": ta, "unique_id": "kid.example.local", "family_id": str(fid2)})
+    c.post("/api/agent/location", headers={"Authorization": f"Bearer {tok}", "X-Real-IP": "10.20.30.70"},
+           json={"wifi": [], "session": "active"})
+    kid = api["devices"]["kid.example.local"]["id"]
+    assert (12, kid) in api["perms"]
+    assert (77, kid) in api["perms"]
+    # выбор семьи на странице «Семьи»: показывается одна семья
+    page = c.get(f"/family?f={fid2}").text
+    assert 'name="f"' in page and f'action="/family/{fid2}"' in page and f'action="/family/{fid}"' not in page
+    r = c.post(f"/family/{fid2}", data={"csrf": ta, "section": "name", "name": "Другая"})
+    assert str(r.url).endswith(f"f={fid2}&ok=%D0%A1%D0%BE%D1%85%D1%80%D0%B0%D0%BD%D0%B5%D0%BD%D0%BE")
 
 
 def test_groups_once_and_family_groups(env):

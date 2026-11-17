@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% macro famcell(d) %}
+  {% if d.agent %}{% if d.main_family %}<span class="pill" title="Основная семья компьютера — меняется на странице «Компьютеры»">{{ fam_names.get(d.main_family, d.main_family) }}</span> {% endif %}{% endif %}
+  {% for fid in d.families %}<form method="post" action="/devices/osmand" class="inline"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="unique_id" value="{{ d.uid }}"><input type="hidden" name="family_id" value="{{ fid }}"><input type="hidden" name="action" value="remove"><span class="pill">{{ fam_names.get(fid, fid) }} <button class="ghost small" title="Убрать из семьи" style="padding: 0 4px">×</button></span></form> {% endfor %}
+  {% if not d.families and not d.main_family %}<span class="muted">личное</span>{% endif %}
+{% endmacro %}
+{% macro addcell(d) %}
+  {% set left = families|rejectattr('id', 'in', d.families)|rejectattr('id', 'equalto', d.main_family)|list %}
+  {% if left %}<form method="post" action="/devices/osmand" class="inline row"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="unique_id" value="{{ d.uid }}">
+    <select name="family_id" style="width: auto; min-width: 0">{% for f in left %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}</select>
+    <button class="ghost small">Добавить</button></form>{% endif %}
+{% endmacro %}
+{% macro table(rows, empty) %}
+  {% if rows %}
+  <div class="scroll"><table class="small" style="margin-top: 8px">
+    <tr><th>Устройство</th><th>На связи</th><th>Семьи</th><th>Добавить в семью</th></tr>
+    {% for d in rows %}
+    <tr>
+      <td><code>{{ d.uid }}</code>{% if d.name %} {{ d.name }}{% endif %}{% if d.vpn %} <span class="pill">VPN</span>{% endif %}</td>
+      <td>{{ d.at.astimezone(cfg.tz).strftime('%d.%m %H:%M') if d.at else '—' }}</td>
+      <td>{{ famcell(d) }}</td>
+      <td>{{ addcell(d) }}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}<p class="muted small">{{ empty }}</p>{% endif %}
+{% endmacro %}
+{% block content %}
+<h1>Устройства Traccar по семьям</h1>
+<p class="hint">Устройство семьи видят на карте Traccar её пользователи (список на странице «Семьи», по умолчанию — родители); одно устройство может быть в нескольких семьях; остальные — личные. Права меняются при следующей точке устройства. Точки на <code>/osmand</code> обогащаются у всех устройств.{% if not traccar_on %} <b>Токен Traccar не задан</b> — видны только устройства из журнала и уже добавленные.{% endif %}</p>
+
+{% if families %}
+<div class="card">
+  <h2>Добавить все</h2>
+  <form method="post" action="/devices/osmand/all" class="row">
+    <input type="hidden" name="csrf" value="{{ user.csrf }}">
+    <select name="family_id" style="width: auto">{% for f in families %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}</select>
+    <select name="only" style="width: auto"><option value="">все остальные устройства</option><option value="vpn">только VPN</option><option value="agent">компьютеры с агентом</option></select>
+    <button class="ghost" onclick="return confirm('Добавить в семью все устройства выбранного списка? Их увидят все пользователи семьи.')">Добавить все</button>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Компьютеры с агентом</h2>
+  <p class="hint">Основная семья компьютера (без крестика) задаётся на странице «Компьютеры» — от неё зависят правила и группа pc. Здесь можно показать компьютер на карте ещё и другим семьям.</p>
+  {{ table(agents, "Компьютеров с агентом пока нет.") }}
+</div>
+
+<div class="card">
+  <h2>Остальные устройства Traccar</h2>
+  <p class="hint">Телефоны с Traccar Client, устройства VPN (по префиксам из общих настроек) и всё остальное, что есть в Traccar или приходило на <code>/osmand</code> за двое суток.</p>
+  {{ table(others, "Других устройств пока нет.") }}
+</div>
+{% endblock %}

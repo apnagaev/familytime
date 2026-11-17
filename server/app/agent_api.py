@@ -470,8 +470,13 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
                 await conn.execute("UPDATE ft_devices SET traccar_ok = true WHERE id = $1",
                                    dev["id"])
             if ok:              # компьютер — на карту пользователей Traccar его семьи
+                viewers = await locator.family_viewers(conn, dev["family_id"])
+                for r in await conn.fetch(      # дополнительные семьи (страница «Traccar»)
+                        "SELECT family_id FROM ft_family_traccar WHERE unique_id = $1",
+                        dev["hostname"]):
+                    viewers += await locator.family_viewers(conn, r["family_id"])
                 await locator.link_device(request.app.state.http, cfg, conn, dev["hostname"],
-                                          await locator.family_viewers(conn, dev["family_id"]))
+                                          viewers)
             sent = await locator.send_osmand(
                 request.app.state.http, cfg, dev, fix, body, ip, now,
                 spread=bool(settings.get("jitter", True)), operator=op)

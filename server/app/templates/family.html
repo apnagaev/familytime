@@ -2,6 +2,17 @@
 {% block content %}
 <h1>{{ 'Семьи' if user.admin else 'Семья' }}</h1>
 
+{% if all_families|length > 1 %}
+<form method="get" action="/family" class="row card">
+  <label for="fsel" class="small muted">Настраивается</label>
+  <select id="fsel" name="f" style="width: auto; min-width: 12em" onchange="this.form.submit()">
+    {% for x in all_families %}<option value="{{ x.id }}" {{ 'selected' if fam and x.id == fam.id }}>{{ x.name }}</option>{% endfor %}
+  </select>
+  <noscript><button class="ghost">Открыть</button></noscript>
+</form>
+{% endif %}
+{% if user.admin %}<p class="small muted">Устройства Traccar всех семей сразу — компьютеры с агентом и телефоны, VPN — на странице <a href="/traccar">«Traccar»</a>.</p>{% endif %}
+
 {% for f in families %}
 {% set m = msg(f.messages, f.kind) %}
 <div class="card">
@@ -148,34 +159,6 @@
 {% else %}
 <div class="card muted">Семьи пока нет. Она создастся, когда вы добавите первого ребёнка на странице «Дети».</div>
 {% endfor %}
-
-{% if user.admin and families %}
-<div class="card" id="osmand">
-  <h2>Телефоны и устройства VPN по семьям</h2>
-  <p class="hint">Устройства, приходившие на <code>/osmand</code> за двое суток, уже добавленные в семьи и устройства VPN из Traccar (по префиксам из общих настроек). Устройство семьи видят на карте Traccar её пользователи; одно устройство может быть в нескольких семьях. Точки обогащаются у всех устройств.</p>
-  <form method="post" action="/devices/osmand/all" class="row">
-    <input type="hidden" name="csrf" value="{{ user.csrf }}">
-    <select name="family_id" style="width: auto">{% for f in families %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}</select>
-    <select name="only" style="width: auto"><option value="">все устройства списка</option><option value="vpn">только VPN</option></select>
-    <button class="ghost" onclick="return confirm('Добавить в семью все устройства списка? Их увидят все пользователи семьи.')">Добавить все</button>
-  </form>
-  {% if admin_devs %}
-  <div class="scroll"><table class="small" style="margin-top: 8px">
-    <tr><th>Устройство</th><th>Последняя точка</th><th>Семьи</th><th>Добавить в семью</th></tr>
-    {% for d in admin_devs %}
-    <tr>
-      <td><code>{{ d.uid }}</code>{% if d.name %} {{ d.name }}{% endif %}</td>
-      <td>{{ d.at.astimezone(cfg.tz).strftime('%d.%m %H:%M') if d.at else '—' }}</td>
-      <td>{% for fid in d.families %}<form method="post" action="/devices/osmand" class="inline"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="unique_id" value="{{ d.uid }}"><input type="hidden" name="family_id" value="{{ fid }}"><input type="hidden" name="action" value="remove"><span class="pill">{{ fam_names.get(fid, fid) }} <button class="ghost small" title="Убрать из семьи" style="padding: 0 4px">×</button></span></form> {% else %}<span class="muted">личное</span>{% endfor %}</td>
-      <td>{% set left = families|rejectattr('id', 'in', d.families)|list %}{% if left %}<form method="post" action="/devices/osmand" class="inline row"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="unique_id" value="{{ d.uid }}">
-        <select name="family_id" style="width: auto; min-width: 0">{% for f in left %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}</select>
-        <button class="ghost small">Добавить</button></form>{% endif %}</td>
-    </tr>
-    {% endfor %}
-  </table></div>
-  {% else %}<p class="muted small">Пока нет устройств: они появятся после первых точек на /osmand.</p>{% endif %}
-</div>
-{% endif %}
 
 {% if user.admin %}
 {% if orphans %}
