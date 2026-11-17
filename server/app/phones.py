@@ -6,8 +6,8 @@
 заменяются местом из таблицы — с разбросом в пределах её точности, как у ноутбуков.
 Остальные точки уходят без изменений.
 
-С 1.7 обогащаются только устройства, которые есть хотя бы в одной семье (ft_family_traccar),
-остальные идут транзитом. Устройства VPN (префикс из списка «VPN», например wg- от vpngeo)
+С 1.8 обогащаются все устройства; устройства семей (ft_family_traccar) ещё и показываются
+на карте её пользователей Traccar. Устройства VPN (префикс из списка «VPN», например wg- от vpngeo)
 приходят с сервера WireGuard; их место считается по extip/localip из самой точки — см.
 refine_vpn. Телефоны и устройства VPN FamilyTime в Traccar не создаёт.
 """
@@ -237,10 +237,11 @@ async def refine_vpn(request: Request, settings: dict, point: dict | None, param
 
 
 async def _handle(request: Request) -> Response:
-    """Устройство в какой-нибудь семье — точка обогащается (место, ip, operator) и устройство
-    показывается на карте пользователей этих семей. Остальные — транзитом: в Traccar как есть,
-    только телефонам дописывается их настоящий ip. Устройства телефонов и VPN FamilyTime в
-    Traccar не создаёт — их заводят вручную."""
+    """Каждая точка обогащается: место (телефон — «Известные адреса» по адресу, с которого он
+    пришёл; VPN — по localip/extip, затем Яндекс и GeoIP), ip, operator. Устройство семьи
+    показывается на карте её пользователей Traccar. Группа (vpn / mobile, из семьи или по
+    умолчанию) назначается один раз. Сами устройства телефонов и VPN FamilyTime в Traccar не
+    создаёт — их заводят вручную."""
     cfg = request.app.state.cfg
     http = request.app.state.http
     body = await request.body()
@@ -256,9 +257,10 @@ async def _handle(request: Request) -> Response:
             settings = await db.get_settings(conn)
             if device:
                 fams = [r["family_id"] for r in await conn.fetch(
-                    "SELECT family_id FROM ft_family_traccar WHERE unique_id = $1", device.lower())]
+                    "SELECT family_id FROM ft_family_traccar WHERE unique_id = $1 ORDER BY added_at",
+                    device.lower())]
             vpn = is_vpn(device, settings.get("vpn_prefixes"))
-            if fams and point:
+            if point:
                 if vpn:
                     fix, ext = await refine_vpn(request, settings, point, params, ip)
                     attr_ip = ext or ip
@@ -267,27 +269,28 @@ async def _handle(request: Request) -> Response:
                 op = await locator.operator(http, cfg, conn, attr_ip)
             if point and device:
                 await _journal(conn, (str(params.get("extip") or "") if vpn else "") or ip, device,
-                               point, ((fix["place"] or fix["source"]) if fix else
-                                       ("" if fams else "транзит")))
-        if fams and device:
-            did = await locator.traccar_device_id(http, cfg, device)
-            if did:
-                async with request.app.state.pool.acquire() as conn:
-                    viewers: list[str] = []
-                    for f in fams:
-                        viewers += await locator.family_viewers(conn, f)
-                    await locator.link_device(http, cfg, conn, device, viewers)
+                               point, (fix["place"] or fix["source"]) if fix else "")
+                group = await locator.group_for(conn, settings, fams[0] if fams else None,
+                                                "vpn" if vpn else "mobile")
+                await locator.assign_group_once(http, cfg, conn, device, group)
+        linked_before = False
+        if device and not fams:
+            async with request.app.state.pool.acquire() as conn:
+                linked_before = bool(await conn.fetchval(
+                    "SELECT 1 FROM ft_traccar_links WHERE unique_id = $1 LIMIT 1", device))
+        if (fams or linked_before) and device and await locator.traccar_device_id(http, cfg, device):
+            async with request.app.state.pool.acquire() as conn:
+                viewers: list[str] = []
+                for f in fams:
+                    viewers += await locator.family_viewers(conn, f)
+                await locator.link_device(http, cfg, conn, device, viewers)
     except Exception as e:  # noqa: BLE001 — точка в Traccar важнее
         log.warning("точка %s: %s", device, e)
     if fix:
         acc = locator.traccar_accuracy(fix.get("source", "known-ip"), fix["accuracy"], fix["place"])
         query, body = rewrite(query, body, ctype, fix["lat"], fix["lon"], acc,
                               fix["place"], fix.get("source", "known-ip"))
-    if fams:
-        query, body = set_ip(query, body, ctype, attr_ip, {"operator": op})
-    elif not vpn:
-        # транзит: только настоящий адрес телефона (иначе Traccar записал бы адрес FamilyTime)
-        query, body = set_ip(query, body, ctype, ip)
+    query, body = set_ip(query, body, ctype, attr_ip, {"operator": op})
     target = cfg.osmand_forward_url or cfg.traccar_osmand_url
     if not target:
         return Response(status_code=503)

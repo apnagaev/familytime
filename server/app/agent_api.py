@@ -461,10 +461,11 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
                 dev["id"], body.battery, body.on_ac, ext_ip)
         sent = False
         if fix and cfg.traccar_osmand_url:
-            # устройство в Traccar — само, в группе для компьютеров (раз за запуск сервера)
+            # компьютер в Traccar заводится сам; группа (pc) — из его семьи, один раз
+            group = await locator.group_for(conn, settings, dev["family_id"], "pc")
             ok = await locator.ensure_traccar_device(
-                request.app.state.http, cfg, dev["hostname"], body.user,
-                group=str(settings.get("traccar_group_pc") or ""), category="laptop")
+                request.app.state.http, cfg, dev["hostname"], body.user, group=group,
+                category="laptop", conn=conn)
             if ok and not dev["traccar_ok"]:
                 await conn.execute("UPDATE ft_devices SET traccar_ok = true WHERE id = $1",
                                    dev["id"])

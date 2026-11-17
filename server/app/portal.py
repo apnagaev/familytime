@@ -696,8 +696,26 @@ async def family_page(request: Request):
         for f in families:
             have = {d["unique_id"] for d in fdevs.get(f["id"], [])}
             addable[f["id"]] = [d for d in mine if str(d["uniqueId"]).lower() not in have]
+        fgroups: dict[int, list] = {}
+        for r in await conn.fetch("SELECT * FROM ft_family_groups WHERE family_id = ANY($1::bigint[]) "
+                                  "ORDER BY name", fams):
+            fgroups.setdefault(r["family_id"], []).append(r)
+        try:
+            cfg = request.app.state.cfg
+            my_groups = await (locator.owner_groups(request.app.state.http, cfg) if u.admin else
+                               locator.user_traccar_groups(request.app.state.http, cfg, conn,
+                                                           u.username, u.email))
+        except Exception as e:  # noqa: BLE001
+            log.warning("группы пользователя в Traccar: %s", e)
+            my_groups = []
+        addable_groups = {f["id"]: [g for g in my_groups if int(g["id"]) not in
+                                    {r["group_id"] for r in fgroups.get(f["id"], [])}]
+                          for f in families}
+        admin_devs = await admin_osmand_devices(request, conn) if u.admin else []
     return page(request, "family.html", u, families=families, kids=kids, orphans=orphans,
-                msg=policy.family_messages, fdevs=fdevs, addable=addable,
+                msg=policy.family_messages, fdevs=fdevs, addable=addable, fgroups=fgroups,
+                addable_groups=addable_groups, admin_devs=admin_devs,
+                fam_names={f["id"]: f["name"] for f in families},
                 traccar_on=bool(request.app.state.cfg.traccar_api_url and request.app.state.cfg.traccar_token))
 
 
@@ -745,6 +763,7 @@ async def family_save(request: Request, family_id: int):
             await conn.execute("UPDATE ft_families SET traccar_users = $2 WHERE id = $1",
                                family_id, users)
             locator._linked.clear()        # пересчитать права при следующих точках
+            await locator.sync_family_groups(request.app.state.http, request.app.state.cfg, conn, family_id)
         elif section == "device_add":
             # только своё устройство: то, что в Traccar доступно самому добавляющему. Так нельзя
             # забрать на карту семьи ни чужой телефон, ни телефон другого родителя
@@ -759,11 +778,54 @@ async def family_save(request: Request, family_id: int):
                    VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING""",
                 uid, family_id, str(own[uid].get("name") or "")[:60], u.username)
             locator._linked.pop(uid, None)
+        elif section == "device_add_all":
+            pcs = {r["hostname"] for r in await conn.fetch("SELECT hostname FROM ft_devices")}
+            n = 0
+            for d in await locator.user_traccar_devices(
+                    request.app.state.http, request.app.state.cfg, conn, u.username, u.email):
+                uid = str(d["uniqueId"]).lower()
+                if uid in pcs:
+                    continue
+                res = await conn.execute(
+                    """INSERT INTO ft_family_traccar (unique_id, family_id, name, added_by)
+                       VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING""",
+                    uid, family_id, str(d.get("name") or "")[:60], u.username)
+                n += res.endswith(" 1")
+                locator._linked.pop(uid, None)
+            return back("/family", ok=f"Добавлено ваших устройств: {n}")
         elif section == "device_remove":
             uid = str(form.get("unique_id", "")).strip().lower()
             await conn.execute("DELETE FROM ft_family_traccar WHERE unique_id = $1 AND family_id = $2",
                                uid, family_id)
             locator._linked.pop(uid, None)
+        elif section in ("group_add", "group_remove"):
+            try:
+                gid = int(str(form.get("group_id", "")))
+            except ValueError:
+                return back("/family", err="Не выбрана группа")
+            http, cfg = request.app.state.http, request.app.state.cfg
+            if section == "group_add":
+                # только своя группа: у администратора — группы владельца токена, у родителя —
+                # доступные ему в Traccar
+                allowed = await (locator.owner_groups(http, cfg) if u.admin else
+                                 locator.user_traccar_groups(http, cfg, conn, u.username, u.email))
+                g = next((g for g in allowed if int(g["id"]) == gid), None)
+                if not g:
+                    return back("/family", err="Этой группы нет среди ваших групп в Traccar")
+                await conn.execute(
+                    """INSERT INTO ft_family_groups (family_id, group_id, name, added_by)
+                       VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING""",
+                    family_id, gid, str(g.get("name") or "")[:60], u.username)
+            else:
+                await conn.execute("DELETE FROM ft_family_groups WHERE family_id = $1 AND group_id = $2",
+                                   family_id, gid)
+            await locator.sync_family_groups(http, cfg, conn, family_id)
+        elif section == "group_names":
+            if not u.admin:
+                raise HTTPException(403, "Группы Traccar для семьи задаёт администратор")
+            vals = [str(form.get(k, "")).strip()[:60] for k in ("group_pc", "group_vpn", "group_mobile")]
+            await conn.execute("UPDATE ft_families SET group_pc = $2, group_vpn = $3, group_mobile = $4 "
+                               "WHERE id = $1", family_id, *vals)
         elif section == "add_parent":
             login = norm_login(str(form.get("parent", "")))
             if not login:
@@ -771,6 +833,7 @@ async def family_save(request: Request, family_id: int):
             await conn.execute("INSERT INTO ft_family_parents VALUES ($1, $2) ON CONFLICT DO NOTHING",
                                family_id, login)
             locator._linked.clear()
+            await locator.sync_family_groups(request.app.state.http, request.app.state.cfg, conn, family_id)
         elif section == "remove_parent":
             login = norm_login(str(form.get("parent", "")))
             if login == u.username and not u.admin:
@@ -779,6 +842,7 @@ async def family_save(request: Request, family_id: int):
             await conn.execute("DELETE FROM ft_family_parents WHERE family_id = $1 AND username = $2",
                                family_id, login)
             locator._linked.clear()
+            await locator.sync_family_groups(request.app.state.http, request.app.state.cfg, conn, family_id)
         elif section == "delete":
             if not u.admin:
                 raise HTTPException(403, "Удалить семью может только администратор")
@@ -839,7 +903,8 @@ async def settings_save(request: Request):
     if errors:
         return back("/settings", err="Известные адреса, не разобрано: " + "; ".join(errors[:3]))
     vpn_prefixes = [x for x in re.split(r"[\s,;]+", str(form.get("vpn_prefixes", "")).strip()) if x][:20]
-    groups = {k: str(form.get(k, "")).strip()[:60] for k in ("traccar_group_pc",)}
+    groups = {k: str(form.get(k, "")).strip()[:60]
+              for k in ("traccar_group_pc", "traccar_group_vpn", "traccar_group_phone")}
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
         await db.set_setting(conn, "jitter", form.get("jitter") == "1", u.username)
@@ -874,18 +939,6 @@ async def devices_page(request: Request):
         families = await db.list_families(conn, None if u.admin else fams)
         from .dist import devices_extra
         extra = await devices_extra(conn, u, fams)
-        if u.admin:
-            # телефоны и устройства VPN, приходившие на /osmand, и уже добавленные в семьи
-            extra["osmand_devices"] = await conn.fetch(
-                """WITH ids AS (
-                       SELECT device AS uid, max(at) AS at FROM ft_phone_fixes GROUP BY device
-                       UNION SELECT unique_id, NULL FROM ft_family_traccar)
-                   SELECT uid, max(at) AS at,
-                          COALESCE(array_agg(DISTINCT t.family_id) FILTER (WHERE t.family_id IS NOT NULL),
-                                   '{}') AS families,
-                          max(t.name) AS name
-                   FROM ids LEFT JOIN ft_family_traccar t ON t.unique_id = ids.uid
-                   GROUP BY uid ORDER BY uid LIMIT 500""")
         extra["install_families"] = [f for f in families if f["id"] in fams]
     return page(request, "devices.html", u, devices=devs, families=families,
                 fam_names={f["id"]: f["name"] for f in families}, now=datetime.now(timezone.utc),
@@ -910,7 +963,64 @@ async def osmand_device_family(request: Request, unique_id: str = Form(...), fam
                 """INSERT INTO ft_family_traccar (unique_id, family_id, added_by) VALUES ($1, $2, $3)
                    ON CONFLICT DO NOTHING""", uid, family_id, u.username)
     locator._linked.pop(uid, None)
-    return back("/devices", ok="Сохранено. Права в Traccar поменяются при следующей точке устройства")
+    return back("/family", ok="Сохранено. Права в Traccar поменяются при следующей точке устройства")
+
+
+async def admin_osmand_devices(request: Request, conn) -> list[dict]:
+    """Для администратора: телефоны и устройства VPN — приходившие на /osmand за двое суток,
+    уже добавленные в семьи и устройства VPN из Traccar (по префиксам), с их семьями."""
+    rows = await conn.fetch(
+        """WITH ids AS (
+               SELECT device AS uid, max(at) AS at FROM ft_phone_fixes GROUP BY device
+               UNION SELECT unique_id, NULL FROM ft_family_traccar)
+           SELECT uid, max(at) AS at,
+                  COALESCE(array_agg(DISTINCT t.family_id) FILTER (WHERE t.family_id IS NOT NULL),
+                           '{}') AS families, max(t.name) AS name
+           FROM ids LEFT JOIN ft_family_traccar t ON t.unique_id = ids.uid
+           GROUP BY uid""")
+    out = {r["uid"].lower(): dict(r) for r in rows}
+    pcs = {r["hostname"] for r in await conn.fetch("SELECT hostname FROM ft_devices")}
+    try:
+        settings = await db.get_settings(conn)
+        cfg = request.app.state.cfg
+        if cfg.traccar_api_url and cfg.traccar_token:
+            alldev = await locator.all_traccar_devices(request.app.state.http, cfg)
+            from .phones import is_vpn
+            for uid, d in alldev.items():
+                if uid and is_vpn(str(uid), settings.get("vpn_prefixes")):
+                    out.setdefault(str(uid).lower(), {"uid": str(uid).lower(), "at": None,
+                                                      "families": [], "name": d.get("name")})
+            for uid, r in out.items():
+                d = alldev.get(uid)
+                if d and not r.get("name"):
+                    r["name"] = d.get("name")
+    except Exception as e:  # noqa: BLE001 — страница важнее
+        log.warning("устройства VPN из Traccar: %s", e)
+    return sorted((r for k, r in out.items() if k not in pcs), key=lambda r: r["uid"])
+
+
+@router.post("/devices/osmand/all")
+async def osmand_devices_all(request: Request, family_id: int = Form(...), csrf: str = Form(""),
+                             only: str = Form("")):
+    """Администратор: все устройства из списка (или только VPN) — в выбранную семью."""
+    u = need_admin(request)
+    auth.check_csrf(request, u, csrf)
+    async with request.app.state.pool.acquire() as conn:
+        if not await conn.fetchval("SELECT 1 FROM ft_families WHERE id = $1", family_id):
+            return back("/family", err="Нет такой семьи")
+        settings = await db.get_settings(conn)
+        from .phones import is_vpn
+        n = 0
+        for r in await admin_osmand_devices(request, conn):
+            if only == "vpn" and not is_vpn(r["uid"], settings.get("vpn_prefixes")):
+                continue
+            res = await conn.execute(
+                """INSERT INTO ft_family_traccar (unique_id, family_id, name, added_by)
+                   VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING""",
+                r["uid"], family_id, str(r.get("name") or "")[:60], u.username)
+            n += res.endswith(" 1")
+            locator._linked.pop(r["uid"], None)
+    return back("/family", ok=f"Добавлено устройств: {n}")
 
 
 @router.post("/devices/{dev_id}")

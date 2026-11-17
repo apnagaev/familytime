@@ -269,3 +269,28 @@ INSERT INTO ft_family_traccar (unique_id, family_id, name, added_by, added_at)
     SELECT unique_id, family_id, name, added_by, added_at FROM ft_family_devices
     ON CONFLICT DO NOTHING;
 DELETE FROM ft_family_devices;
+
+-- 1.8: группы Traccar по семьям (назначаются один раз, при первом обращении устройства),
+-- группы устройств в семье (права пользователей семьи на группу)
+ALTER TABLE ft_families ADD COLUMN IF NOT EXISTS group_pc text NOT NULL DEFAULT '';
+ALTER TABLE ft_families ADD COLUMN IF NOT EXISTS group_vpn text NOT NULL DEFAULT '';
+ALTER TABLE ft_families ADD COLUMN IF NOT EXISTS group_mobile text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS ft_traccar_assigned (   -- кому группа уже назначена: больше не трогаем
+    unique_id   text PRIMARY KEY,
+    group_id    bigint,
+    assigned_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ft_family_groups (
+    family_id bigint NOT NULL REFERENCES ft_families ON DELETE CASCADE,
+    group_id  bigint NOT NULL,
+    name      text NOT NULL DEFAULT '',
+    added_by  text NOT NULL DEFAULT '',
+    added_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (family_id, group_id)
+);
+CREATE TABLE IF NOT EXISTS ft_traccar_group_links (  -- права на группы, выданные FamilyTime
+    family_id bigint NOT NULL,
+    group_id  bigint NOT NULL,
+    user_id   bigint NOT NULL,
+    PRIMARY KEY (family_id, group_id, user_id)
+);

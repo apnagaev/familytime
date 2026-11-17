@@ -56,6 +56,9 @@ def env():
             assert req.headers["authorization"] == "Bearer tok"
             path = req.url.path
             if path == "/api/groups" and req.method == "GET":
+                if "userId" in req.url.params:          # группы пользователя
+                    ids = api.get("user_groups", {}).get(int(req.url.params["userId"]), [])
+                    return httpx.Response(200, json=[g for g in api["groups"] if g["id"] in ids])
                 # без all — только группы владельца токена; с all — и чужие
                 return httpx.Response(200, json=[g for g in api["groups"]
                                                  if req.url.params.get("all") == "true"
@@ -86,7 +89,7 @@ def env():
                 return httpx.Response(200, json=api["users"])
             if path == "/api/permissions":
                 b = json.loads(req.content)
-                key = (b["userId"], b["deviceId"])
+                key = (b["userId"], b["deviceId"]) if "deviceId" in b else (b["userId"], ("g", b["groupId"]))
                 if req.method == "POST":
                     if key in api["perms"]:
                         return httpx.Response(400, text="Duplicate")
@@ -209,11 +212,14 @@ def test_computers_created_and_grouped(env):
     assert api["devices"]["old.example.local"]["groupId"] == own[0]["id"]
     assert len([x for x in calls if x.url.host == "tapi" and x.method == "POST"
                 and x.url.path == "/api/devices"]) == 1
-    # номер группы
+    # группа назначается один раз: смена настройки старые устройства не трогает,
+    # новые идут в новую группу (номер группы вместо имени)
     locator._ensured.clear()
     save_settings(c, t, traccar_group_pc="900")
     locate("new.example.local")
-    assert api["devices"]["new.example.local"]["groupId"] == 900
+    assert api["devices"]["new.example.local"]["groupId"] == own[0]["id"]
+    locate("third.example.local")
+    assert api["devices"]["third.example.local"]["groupId"] == 900
 
 
 def test_family_devices_only_from_parents(env):
@@ -251,23 +257,29 @@ def test_family_devices_only_from_parents(env):
     c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
     q = osm(calls).url.params
     assert q["source"] == "known-ip" and (12, 41) in api["perms"]
-    # чужое — транзитом, никому
+    # чужое — тоже обогащается, но на карту семьи не попадает
     c.get("/osmand?id=99999&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
-    assert "source" not in osm(calls).url.params and not any(d == 42 for _, d in api["perms"])
+    assert osm(calls).url.params["source"] == "known-ip" and not any(d == 42 for _, d in api["perms"])
     # компьютер семьи — тоже на карту папы
     tok = c.post("/api/agent/enroll", json={"hostname": "kid.example.local", "secret": "enroll"}).json()["token"]
     run_sql("UPDATE ft_devices SET family_id = $1", fid)
     c.post("/api/agent/location", headers={"Authorization": f"Bearer {tok}", "X-Real-IP": "10.20.30.70"},
            json={"wifi": [], "session": "active"})
     assert (12, api["devices"]["kid.example.local"]["id"]) in api["perms"]
-    # убрать из семьи — снова личное: права забираются, точка транзитом
+    # убрать из семьи — снова личное: права забираются
     c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_remove", "unique_id": "82750699"})
     c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
-    assert "source" not in osm(calls).url.params
-    # администратор: выбор семьи списком на странице «Компьютеры»
+    assert (12, 41) not in api["perms"]
+    # «добавить все мои»
+    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_add_all"})
+    assert "Добавлено ваших устройств: 1" in r.text
+    # администратор: выбор семьи списком на вкладке «Семьи»; VPN из Traccar тоже в списке
+    api["devices"]["wg-peer"] = {"id": 50, "uniqueId": "wg-peer", "name": "Пир VPN", "_linked": False}
+    locator._all_devices.update(at=float("-inf"), by_uid={})
     ta = login(c)
-    page = c.get("/devices").text
-    assert "Телефоны и устройства VPN" in page and "<code>99999</code>" in page
+    page = c.get("/family").text
+    assert "Телефоны и устройства VPN по семьям" in page and "<code>99999</code>" in page
+    assert "<code>wg-peer</code> Пир VPN" in page and "<option value=\"%d\"" % fid in page
     r = c.post("/devices/osmand", data={"csrf": ta, "unique_id": "99999", "family_id": str(fid)})
     assert "Сохранено" in r.text
     assert run_sql("SELECT family_id FROM ft_family_traccar WHERE unique_id='99999'", fetch=True)
@@ -279,3 +291,63 @@ def test_family_devices_only_from_parents(env):
     for f in (fid, fid2):
         c.post("/devices/osmand", data={"csrf": ta, "unique_id": "99999", "family_id": str(f)})
     assert len(run_sql("SELECT 1 FROM ft_family_traccar WHERE unique_id='99999'", fetch=True)) == 2
+
+
+def test_groups_once_and_family_groups(env):
+    """Группы vpn/pc/mobile — из семьи, назначаются один раз; группы устройств семьи —
+    права пользователей семьи на группу; «добавить все» у администратора."""
+    c, calls, api = env
+    t = login(c)
+    save_settings(c, t, traccar_group_pc="PC", traccar_group_vpn="VPN", traccar_group_phone="mobile")
+    fid = run_sql("INSERT INTO ft_families (name) VALUES ('Ивановы') RETURNING id", fetch=True)[0]["id"]
+    run_sql("INSERT INTO ft_family_parents VALUES ($1, 'mom')", fid)
+    run_sql("INSERT INTO ft_people (username, email) VALUES ('mom', 'mom@example.com')")
+    r = c.post(f"/family/{fid}", data={"csrf": t, "section": "group_names", "group_pc": "Ивановы PC",
+                                       "group_vpn": "", "group_mobile": "Ивановы mobile"})
+    assert "Сохранено" in r.text
+    api["devices"]["555"] = {"id": 60, "uniqueId": "555", "name": "Телефон", "groupId": None}
+    api["devices"]["wg-a"] = {"id": 61, "uniqueId": "wg-a", "name": "VPN", "groupId": None}
+    run_sql("INSERT INTO ft_family_traccar (unique_id, family_id) VALUES ('555', $1)", fid)
+    c.get("/osmand?id=555&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
+    c.get("/osmand?id=wg-a&lat=1&lon=1&extip=95.31.1.20", headers={"X-Real-IP": "10.20.40.5"})
+    c.get("/osmand?id=nobody&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})   # нет в Traccar
+    groups = {g["name"]: g["id"] for g in api["groups"]}
+    assert api["devices"]["555"]["groupId"] == groups["Ивановы mobile"]   # из семьи
+    assert api["devices"]["wg-a"]["groupId"] == groups["VPN"]             # не в семье — по умолчанию
+    assert "nobody" not in api["devices"]                                 # телефоны не создаются
+    # перенесли в Traccar вручную — FamilyTime больше не трогает (только первое обращение)
+    api["devices"]["555"]["groupId"] = 999
+    locator._ensured.clear()
+    c.get("/osmand?id=555&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
+    assert api["devices"]["555"]["groupId"] == 999
+    # компьютер семьи — в её группу PC, тоже один раз
+    tok = c.post("/api/agent/enroll", json={"hostname": "pc1.example.local", "secret": "enroll"}).json()["token"]
+    run_sql("UPDATE ft_devices SET family_id = $1", fid)
+    c.post("/api/agent/location", headers={"Authorization": f"Bearer {tok}", "X-Real-IP": "10.20.30.70"},
+           json={"wifi": [], "session": "active"})
+    groups = {g["name"]: g["id"] for g in api["groups"]}
+    assert api["devices"]["pc1.example.local"]["groupId"] == groups["Ивановы PC"]
+    # группа устройств в семье: администратор выбирает из своих групп; права — маме на группу
+    api["groups"].append({"id": 700, "name": "Дача"})
+    r = c.post(f"/family/{fid}", data={"csrf": t, "section": "group_add", "group_id": "700"})
+    assert "Сохранено" in r.text and "Дача" in c.get("/family").text
+    assert (11, ("g", 700)) in api["perms"]
+    # родитель — только свои группы
+    api["user_groups"] = {11: [701]}
+    api["groups"].append({"id": 701, "name": "Мамина", "_own": False})
+    api["groups"].append({"id": 702, "name": "Чужая", "_own": False})
+    tm = login_as(c, "mom", "mom@example.com")
+    page = c.get("/family").text
+    assert "Мамина (#701)" in page and "Чужая" not in page
+    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "group_add", "group_id": "702"})
+    assert "нет среди ваших групп" in r.text
+    # убрать группу — права забираются
+    c.post(f"/family/{fid}", data={"csrf": tm, "section": "group_remove", "group_id": "700"})
+    assert (11, ("g", 700)) not in api["perms"]
+    # администратор: «добавить все» только VPN
+    ta = login(c)
+    r = c.post("/devices/osmand/all", data={"csrf": ta, "family_id": str(fid), "only": "vpn"})
+    assert "Добавлено устройств:" in r.text
+    ids = {r["unique_id"] for r in run_sql("SELECT unique_id FROM ft_family_traccar WHERE family_id = $1",
+                                           fid, fetch=True)}
+    assert "wg-a" in ids and "nobody" not in ids
