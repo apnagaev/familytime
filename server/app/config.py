@@ -35,6 +35,10 @@ class Config:
     # Яндекс Локатор
     yandex_locator_keys: list[str] = field(default_factory=list)
     yandex_locator_url: str = "https://locator.api.maps.yandex.ru/v1/locate"
+    locator_daily_limit: int = 100        # запросов на ключ в сутки
+    locator_reserve: int = 20             # сколько оставить на ключе после обновления точек
+    locator_refresh_before: int = 10      # минут до конца суток ключа — обновить старые точки
+    locator_day_tz: str = "Europe/Moscow" # сутки лимита Локатора (с полуночи)
     # место по IP, когда Wi-Fi нет; {ip} подставляется; пусто — не использовать
     geoip_url: str = "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"
     operator_url: str = "http://ip-api.com/json/{ip}?fields=status,isp,org,as"
@@ -80,6 +84,10 @@ class Config:
             yandex_locator_keys=_list("YANDEX_LOCATOR_KEYS"),
             yandex_locator_url=os.environ.get(
                 "YANDEX_LOCATOR_URL", "https://locator.api.maps.yandex.ru/v1/locate"),
+            locator_daily_limit=int(os.environ.get("LOCATOR_DAILY_LIMIT", "100") or 100),
+            locator_reserve=int(os.environ.get("LOCATOR_RESERVE", "20") or 20),
+            locator_refresh_before=int(os.environ.get("LOCATOR_REFRESH_BEFORE", "10") or 10),
+            locator_day_tz=os.environ.get("LOCATOR_DAY_TZ", "Europe/Moscow") or "Europe/Moscow",
             geoip_url=os.environ.get(
                 "GEOIP_URL", "http://ip-api.com/json/{ip}?fields=status,lat,lon,city"),
             operator_url=os.environ.get(

@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__, agent_api, auth, db, dist, lists, phones, portal
+from . import __version__, agent_api, auth, db, dist, lists, phones, portal, quota
 from .config import Config
 from .telegram import Telegram
 
@@ -36,6 +36,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         app.state.tg = Telegram(cfg, app.state.http, app.state.pool)
         task = asyncio.create_task(app.state.tg.run())
         lists_task = asyncio.create_task(lists.updater(app.state.pool, app.state.http))
+        quota_task = asyncio.create_task(quota.refresher(app.state))
         log.info("familytime %s запущен: PUBLIC_URL=%s, COMPANY_HOSTS=%s", __version__,
                  cfg.public_url, ",".join(cfg.company_hosts) or "—")
         if not (cfg.traccar_api_url and cfg.traccar_token):
@@ -46,6 +47,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         finally:
             task.cancel()
             lists_task.cancel()
+            quota_task.cancel()
             await app.state.pool.close()
             await app.state.http.aclose()
 

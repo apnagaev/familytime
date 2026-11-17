@@ -146,3 +146,92 @@ def test_location_sources(env):
     n = len(calls)
     r = loc("192.168.50.3", [])
     assert r["ok"] is False and hosts(calls, n) == []
+
+
+def test_locator_quota_and_refresh():
+    """Учёт запросов к Локатору по ключам, обход исчерпанных и отклонённых, обновление
+    самых старых мест по IP перед концом суток с резервом."""
+    import json
+    from datetime import datetime, timedelta, timezone
+    from app import quota
+
+    async def reset():
+        conn = await asyncpg.connect(DSN)
+        await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        await conn.close()
+    asyncio.run(reset())
+    calls = []
+
+    def handler(req: httpx.Request):
+        if req.url.host == "locator.api.maps.yandex.ru":
+            calls.append(req)
+            if req.url.params["apikey"] == "dead-key-000":
+                return httpx.Response(403)
+            ip = json.loads(req.content)["ip"][0]["address"]
+            return httpx.Response(200, json={"location": {"point": {"lat": 50.0, "lon": float(ip.split(".")[-1])},
+                                                          "accuracy": 0}})
+        return httpx.Response(200)
+
+    cfg = Config(database_url=DSN, public_url="https://kids.example.com", session_secret="s" * 32,
+                 enroll_secret="enroll", dev_login=True, oidc_issuer="https://sso.example.com/r",
+                 yandex_locator_keys=["key-one-0001", "dead-key-000", "key-two-0002"],
+                 locator_daily_limit=5, locator_reserve=2, geoip_url="", operator_url="")
+    app = create_app(cfg)
+    with TestClient(app, base_url="https://kids.example.com") as c:
+        app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        now = datetime.now(timezone.utc)
+        day = quota.quota_day(cfg, now)
+
+        async def prep():
+            async with app.state.pool.acquire() as conn:
+                for i in range(10):
+                    await conn.execute(
+                        "INSERT INTO ft_geoip VALUES ($1, 1, 1, 50000, 'geoip', '', $2)",
+                        f"95.31.7.{i + 1}", now - timedelta(days=20 - i))
+                await conn.execute("INSERT INTO ft_locator_usage (key_id, day, requests) VALUES ($1, $2, 1)",
+                                   quota.key_id("key-one-0001"), day)
+        c.portal.call(prep)
+
+        # обычный запрос: наименее израсходованный ключ (не key-one), отклонённый пропускается
+        async def one():
+            async with app.state.pool.acquire() as conn:
+                return await locator.locate(app.state.http, cfg, [], "95.31.8.1", conn)
+        fix = c.portal.call(one)
+        assert fix and fix.source == "yandex-ip"
+        used = [r.url.params["apikey"] for r in calls]
+        assert used[0] != "key-one-0001" and used[-1] == "key-two-0002"
+        calls.clear()
+
+        # не время — ничего; за 5 минут до конца суток — обновление
+        assert c.portal.call(quota.refresh_due, app.state.pool, app.state.http, cfg,
+                             quota.day_end(cfg, day) - timedelta(minutes=30)) is None
+        n = c.portal.call(quota.refresh_due, app.state.pool, app.state.http, cfg,
+                          quota.day_end(cfg, day) - timedelta(minutes=5))
+
+        async def check():
+            async with app.state.pool.acquire() as conn:
+                use = {r["key_id"]: r for r in await conn.fetch(
+                    "SELECT * FROM ft_locator_usage WHERE day = $1", day)}
+                geo = await conn.fetch("SELECT ip, source FROM ft_geoip ORDER BY fetched_at")
+                return use, geo
+        use, geo = c.portal.call(check)
+        k1, k2 = use[quota.key_id("key-one-0001")], use[quota.key_id("key-two-0002")]
+        # остаток до резерва: key-one 5-2-1 = 2, key-two 5-2-1(обычный запрос) = 2
+        assert k1["requests"] == 3 and k1["refresh"] == 2
+        assert k2["requests"] == 3 and k2["refresh"] == 2
+        assert use[quota.key_id("dead-key-000")]["rejected"] >= 1
+        assert n == 4 and sum(r["source"] == "yandex-ip" for r in geo) == 4
+        # повторно в те же сутки — нет
+        assert c.portal.call(quota.refresh_due, app.state.pool, app.state.http, cfg,
+                             quota.day_end(cfg, day) - timedelta(minutes=2)) is None
+        # исчерпанные и отклонённые ключи не выбираются
+        async def keys():
+            async with app.state.pool.acquire() as conn:
+                await conn.execute("UPDATE ft_locator_usage SET requests = 5 WHERE key_id = $1",
+                                   quota.key_id("key-one-0001"))
+                return await quota.pick_keys(conn, cfg)
+        assert c.portal.call(keys) == ["key-two-0002"]
+        # статистика на странице настроек
+        c.get("/dev-login?u=root&admin=1")
+        page = c.get("/settings").text
+        assert "Яндекс Локатор" in page and "key-…0001" in page and "отклонён" in page

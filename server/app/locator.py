@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from . import quota
+
 log = logging.getLogger("familytime.locator")
 
 _BSSID = re.compile(r"^[0-9a-f]{12}$")
@@ -150,31 +152,52 @@ def build_request(wifi, ip: str) -> dict:
     return body
 
 
-async def locate(http: httpx.AsyncClient, cfg, wifi, ip: str) -> Fix | None:
+async def locate_with(http: httpx.AsyncClient, cfg, key: str, body: dict) -> tuple[Fix | None, str]:
+    """Один запрос к Локатору одним ключом. Статус: found | empty | rejected | error."""
+    try:
+        r = await http.post(cfg.yandex_locator_url, params={"apikey": key}, json=body,
+                            headers={"User-Agent": "familytime/1.0"}, timeout=15)
+    except httpx.HTTPError as e:
+        log.warning("locator: %s", e)
+        return None, "error"
+    if r.status_code in (403, 429):
+        log.warning("locator: ключ %s отклонён (%s)", quota.key_label(key), r.status_code)
+        return None, "rejected"
+    if r.status_code != 200:
+        log.warning("locator: HTTP %s %s", r.status_code, r.text[:200])
+        return None, "error"
+    try:
+        loc = (r.json() or {}).get("location")
+    except ValueError:
+        return None, "error"
+    if not loc:
+        return None, "empty"
+    src = "yandex-wifi" if "wifi" in body else "yandex-ip"
+    return Fix(float(loc["point"]["lat"]), float(loc["point"]["lon"]),
+               float(loc.get("accuracy") or 0), src), "found"
+
+
+async def locate(http: httpx.AsyncClient, cfg, wifi, ip: str, conn=None) -> Fix | None:
+    """Место через Яндекс Локатор. С conn — учёт запросов по ключам: сначала наименее
+    израсходованный, исчерпанные и отклонённые за сутки ключи пропускаются."""
     body = build_request(wifi, ip)
     if not body or not cfg.yandex_locator_keys:
         return None
-    keys = list(cfg.yandex_locator_keys)
-    random.shuffle(keys)
+    keys = await quota.pick_keys(conn, cfg)
+    if conn is None:
+        random.shuffle(keys)
+    kind = "wifi" if "wifi" in body else "ip"
     for key in keys:
+        fix, status = await locate_with(http, cfg, key, body)
         try:
-            r = await http.post(cfg.yandex_locator_url, params={"apikey": key}, json=body,
-                                headers={"User-Agent": "familytime/1.0"}, timeout=15)
-        except httpx.HTTPError as e:
-            log.warning("locator: %s", e)
-            return None
-        if r.status_code in (403, 429):
-            log.warning("locator: ключ отклонён (%s), пробую следующий", r.status_code)
+            await quota.count(conn, cfg, key, kind, status)
+        except Exception as e:  # noqa: BLE001 — учёт не должен мешать месту
+            log.warning("учёт Локатора: %s", e)
+        if status == "rejected":
             continue
-        if r.status_code != 200:
-            log.warning("locator: HTTP %s %s", r.status_code, r.text[:200])
-            return None
-        loc = (r.json() or {}).get("location")
-        if not loc:
-            return None
-        src = "yandex-wifi" if "wifi" in body else "yandex-ip"
-        return Fix(float(loc["point"]["lat"]), float(loc["point"]["lon"]),
-                   float(loc.get("accuracy") or 0), src)
+        return fix
+    if not keys:
+        log.warning("locator: все ключи исчерпаны на сегодня")
     return None
 
 
@@ -219,7 +242,7 @@ async def resolve(http, cfg, conn, settings: dict, dev, wifi, ip: str, ext_ip: s
                 and dev["last_fix_source"] == "yandex-wifi"):
             return Fix(dev["last_lat"], dev["last_lon"], dev["last_accuracy"] or 0,
                        "yandex-wifi", cached=True), sig
-        fix = await locate(http, cfg, wifi, ext_ip or ip)
+        fix = await locate(http, cfg, wifi, ext_ip or ip, conn)
         if fix:
             return fix, sig
     # без Wi-Fi: место, которое агент уже узнал вместе с внешним адресом, — без запросов
@@ -242,7 +265,7 @@ async def ip_location(http, cfg, conn, pip: str) -> Fix | None:
     row = await conn.fetchrow("SELECT * FROM ft_geoip WHERE ip = $1", pip)
     if row and now - row["fetched_at"] < GEOIP_TTL:
         return Fix(row["lat"], row["lon"], row["accuracy"], row["source"], row["place"], True)
-    fix = await locate(http, cfg, [], pip) or await geoip(http, cfg, pip)
+    fix = await locate(http, cfg, [], pip, conn) or await geoip(http, cfg, pip)
     if fix:
         if fix.source == "yandex-ip" and not fix.accuracy:
             fix.accuracy = GEOIP_ACCURACY

@@ -36,6 +36,29 @@
   <p class="hint">Как определяется место: известный адрес → Wi-Fi вокруг (Яндекс Локатор; пока точки и IP те же, прошлое место используется до суток без нового запроса) → без Wi-Fi по внешнему IP, с точностью до города (запоминается на месяц). Действует на все компьютеры всех семей и компаний. Сайты, программы, подписки, простой и предупреждения настраиваются на странице каждого ребёнка, тексты сообщений и чаты Telegram — на странице семьи.</p>
 </div>
 
+<div class="card" id="locator">
+  <h2>Яндекс Локатор</h2>
+  {% set L = loc_stats %}
+  {% if L.rows %}
+  <div class="scroll"><table class="small">
+    <tr><th>Ключ</th><th>Сегодня</th><th>Осталось</th><th>Wi-Fi</th><th>IP</th><th>Обновление</th><th>Нашёл</th><th>Отказы</th><th>За 7 суток</th></tr>
+    {% for k in L.rows %}{% set t = k.today %}
+    <tr>
+      <td><code>{{ k.label }}</code></td>
+      <td>{{ t.requests or 0 }} / {{ L.limit }}</td>
+      <td class="{{ 'warn' if k.left < L.reserve or t.rejected }}">{{ 'отклонён' if t.rejected else k.left }}</td>
+      <td>{{ t.wifi or 0 }}</td><td>{{ t.ip or 0 }}</td><td>{{ t.refresh or 0 }}</td><td>{{ t.found or 0 }}</td>
+      <td>{{ (t.rejected or 0) + (t.errors or 0) }}</td>
+      <td style="white-space: nowrap" title="{% for d, n in k.history %}{{ d.strftime('%d.%m') }}: {{ n }}&#10;{% endfor %}">{% for d, n in k.history %}<span style="display: inline-block; width: 6px; margin-right: 1px; vertical-align: bottom; background: currentColor; opacity: .55; height: {{ (2 + 16 * n / L.limit)|round|int if n else 1 }}px"></span>{% endfor %} {{ k.history|sum(attribute=1) }}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  <p class="hint">Лимит — {{ L.limit }} запросов на ключ в сутки (с полуночи по часовому поясу <code>{{ cfg.locator_day_tz }}</code>). Сначала тратится наименее израсходованный ключ; выбравший лимит или отклонённый Яндексом ключ до конца суток не используется. За {{ L.before }} минут до конца суток ({{ L.refresh_at.astimezone(cfg.tz).strftime('%H:%M') }}) остаток каждого ключа, кроме {{ L.reserve }} запросов, тратится на обновление самых старых мест по IP.
+  {% if L.last %}Последнее обновление: {{ L.last.day.strftime('%d.%m') }}, мест — {{ L.last.refreshed }}.{% endif %}
+  Мест по IP в базе: {{ L.cached }}{% if L.oldest %}, самое старое — {{ L.oldest.astimezone(cfg.tz).strftime('%d.%m.%Y %H:%M') }}{% endif %}.</p>
+  {% else %}<p class="muted small">Ключи Локатора не заданы (<code>YANDEX_LOCATOR_KEYS</code>).</p>{% endif %}
+</div>
+
 <div class="card" id="ca">
   <h2>Доверенные сертификаты</h2>
   <p class="hint">Если сайт портала подписан центром, которого нет в Windows по умолчанию (сертификаты Минцифры «Russian Trusted Root CA», центр своего домена), без них компьютеры вне домена не могут связаться с порталом. Загруженные здесь центры установщик <code>FamilyTime-setup.cmd</code> добавляет в хранилище компьютера до первого обращения к порталу, а агенты 1.4.1 и новее получают их с политикой и добавляют сами. Только сертификаты центров (корневые и промежуточные); ГОСТ не нужен.</p>

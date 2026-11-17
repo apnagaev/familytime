@@ -294,3 +294,25 @@ CREATE TABLE IF NOT EXISTS ft_traccar_group_links (  -- права на груп
     user_id   bigint NOT NULL,
     PRIMARY KEY (family_id, group_id, user_id)
 );
+
+-- 1.9: учёт запросов к Яндекс Локатору по ключам (сутки лимита) и обновление старых точек
+CREATE TABLE IF NOT EXISTS ft_locator_usage (
+    key_id    text NOT NULL,              -- sha256 ключа (сам ключ в базе не хранится)
+    day       date NOT NULL,
+    label     text NOT NULL DEFAULT '',   -- начало…конец ключа для страницы
+    requests  integer NOT NULL DEFAULT 0, -- все запросы (их считает Яндекс)
+    wifi      integer NOT NULL DEFAULT 0,
+    ip        integer NOT NULL DEFAULT 0,
+    refresh   integer NOT NULL DEFAULT 0, -- обновление старых точек перед концом суток
+    found     integer NOT NULL DEFAULT 0, -- Яндекс вернул место
+    rejected  integer NOT NULL DEFAULT 0, -- 403/429: ключ исчерпан или отключён
+    errors    integer NOT NULL DEFAULT 0,
+    last_at   timestamptz,
+    PRIMARY KEY (key_id, day)
+);
+CREATE TABLE IF NOT EXISTS ft_locator_refresh (
+    day        date PRIMARY KEY,
+    done_at    timestamptz NOT NULL,
+    refreshed  integer NOT NULL DEFAULT 0,
+    details    jsonb NOT NULL DEFAULT '{}'
+);

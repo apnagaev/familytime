@@ -869,7 +869,9 @@ async def settings_page(request: Request):
             "SELECT count(DISTINCT device) FROM ft_phone_fixes WHERE at > now() - interval '1 day'")
         from .dist import settings_extra
         extra = await settings_extra(conn)
-    return page(request, "settings.html", u, s=s, points_devices=points_devices,
+        from . import quota
+        loc_stats = await quota.stats(conn, request.app.state.cfg)
+    return page(request, "settings.html", u, s=s, points_devices=points_devices, loc_stats=loc_stats,
                 ip_locations=locator.format_ip_locations(s["ip_locations"]), **extra)
 
 
