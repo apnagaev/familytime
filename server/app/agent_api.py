@@ -461,12 +461,13 @@ async def location(body: LocationIn, request: Request, dev=Depends(current_devic
                 dev["id"], body.battery, body.on_ac, ext_ip)
         sent = False
         if fix and cfg.traccar_osmand_url:
-            if not dev["traccar_ok"]:
-                ok = await locator.ensure_traccar_device(
-                    request.app.state.http, cfg, dev["hostname"], body.user)
-                if ok:
-                    await conn.execute("UPDATE ft_devices SET traccar_ok = true WHERE id = $1",
-                                       dev["id"])
+            # устройство в Traccar — само, в группе для компьютеров (раз за запуск сервера)
+            ok = await locator.ensure_traccar_device(
+                request.app.state.http, cfg, dev["hostname"], body.user,
+                group=str(settings.get("traccar_group_pc") or ""), category="laptop")
+            if ok and not dev["traccar_ok"]:
+                await conn.execute("UPDATE ft_devices SET traccar_ok = true WHERE id = $1",
+                                   dev["id"])
             sent = await locator.send_osmand(
                 request.app.state.http, cfg, dev, fix, body, ip, now,
                 spread=bool(settings.get("jitter", True)), operator=op)

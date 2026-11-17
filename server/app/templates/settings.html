@@ -23,10 +23,23 @@
     <textarea name="phone_ids" style="min-height: 70px; font-family: monospace">{{ s.phone_ids|join('\n') }}</textarea>
     {% if phones %}
     <table class="small" style="margin-top: 8px">
-      <tr><th>Телефон</th><th>Адрес</th><th>Известное место</th><th class="num">Точек за сутки</th><th>Последняя</th></tr>
+      <tr><th>Устройство</th><th>Адрес</th><th>Место</th><th class="num">Точек за сутки</th><th>Последняя</th></tr>
       {% for p in phones %}<tr><td>{{ p.device }}</td><td>{{ p.net }}</td><td>{{ p.place or '—' }}</td><td class="num">{{ p.n }}</td><td>{{ p.at.astimezone(cfg.tz).strftime('%d.%m %H:%M') }}</td></tr>{% endfor %}
     </table>
     {% endif %}
+
+    <h2 style="margin-top: 18px">Устройства VPN (vpngeo)</h2>
+    <p class="hint">Точки устройств, чей идентификатор начинается с одного из этих префиксов, приходят на <code>/osmand</code> с сервера WireGuard. Их место FamilyTime определяет по адресам из самой точки: <code>localip</code> (адрес в туннеле) и <code>extip</code> (внешний адрес подключения) — по «Известным адресам», иначе Яндекс Локатор по <code>extip</code>, иначе город по IP. Место по IP хранится месяц. Смещение, сделанное отправителем, не учитывается — разброс как у компьютеров. В точку пишутся <code>ip</code> и <code>operator</code> по <code>extip</code>.</p>
+    <label class="block small">Префиксы, по одному на строке</label>
+    <textarea name="vpn_prefixes" style="min-height: 50px; font-family: monospace">{{ s.vpn_prefixes|join('\n') }}</textarea>
+
+    <h2 style="margin-top: 18px">Группы Traccar</h2>
+    <p class="hint">Устройства, которых ещё нет в Traccar, FamilyTime заводит сам и кладёт в группу (группа создаётся, если её нет; уже существующие устройства переносятся в неё). Пусто — без группы. Нужны токен администратора Traccar и адрес API.</p>
+    <div class="row">
+      <label>Компьютеры <input type="text" name="traccar_group_pc" value="{{ s.traccar_group_pc }}" placeholder="PC"></label>
+      <label>VPN <input type="text" name="traccar_group_vpn" value="{{ s.traccar_group_vpn }}" placeholder="VPN"></label>
+      <label>Телефоны <input type="text" name="traccar_group_phone" value="{{ s.traccar_group_phone }}" placeholder="без группы"></label>
+    </div>
 
     <div class="row" style="margin-top: 10px"><button>Сохранить</button></div>
   </form>

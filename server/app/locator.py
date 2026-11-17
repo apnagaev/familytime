@@ -32,7 +32,7 @@ _KNOWN_LINE = re.compile(
 
 
 WIFI_REUSE = timedelta(hours=24)      # те же точки Wi-Fi и IP — место не переспрашиваем
-GEOIP_TTL = timedelta(days=7)         # сколько помнить место по IP
+GEOIP_TTL = timedelta(days=30)        # сколько помнить место по IP (экономия запросов к Локатору)
 GEOIP_ACCURACY = 10000.0              # м: место по IP — это город
 
 
@@ -77,18 +77,19 @@ def format_ip_locations(items: list[dict]) -> str:
         for i in items or [])
 
 
-def match_known(items: list[dict], ip: str) -> Fix | None:
-    """Самая узкая подсеть, в которую попадает адрес."""
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return None
+def match_known(items: list[dict], *ips: str) -> Fix | None:
+    """Самая узкая подсеть, в которую попадает любой из адресов."""
     best = None
-    for i in items or []:
-        net = ipaddress.ip_network(i["net"], strict=False)
-        if addr.version == net.version and addr in net and \
-                (best is None or net.prefixlen > best[0]):
-            best = (net.prefixlen, i)
+    for ip in ips:
+        try:
+            addr = ipaddress.ip_address((ip or "").strip())
+        except ValueError:
+            continue
+        for i in items or []:
+            net = ipaddress.ip_network(i["net"], strict=False)
+            if addr.version == net.version and addr in net and \
+                    (best is None or net.prefixlen > best[0]):
+                best = (net.prefixlen, i)
     if not best:
         return None
     i = best[1]
@@ -214,9 +215,19 @@ async def resolve(http, cfg, conn, settings: dict, dev, wifi, ip: str, ext_ip: s
     pip = ext_ip or public_ip(ip)
     if not pip:
         return None, sig
+    return await ip_location(http, cfg, conn, pip), sig
+
+
+async def ip_location(http, cfg, conn, pip: str) -> Fix | None:
+    """Место по внешнему адресу: Яндекс Локатор по IP, иначе служба GeoIP. Ответ хранится
+    в ft_geoip месяц — повторные точки с того же адреса Локатор не тратят."""
+    pip = public_ip(pip)
+    if not pip:
+        return None
+    now = datetime.now(timezone.utc)
     row = await conn.fetchrow("SELECT * FROM ft_geoip WHERE ip = $1", pip)
     if row and now - row["fetched_at"] < GEOIP_TTL:
-        return Fix(row["lat"], row["lon"], row["accuracy"], row["source"], row["place"], True), sig
+        return Fix(row["lat"], row["lon"], row["accuracy"], row["source"], row["place"], True)
     fix = await locate(http, cfg, [], pip) or await geoip(http, cfg, pip)
     if fix:
         if fix.source == "yandex-ip" and not fix.accuracy:
@@ -228,7 +239,7 @@ async def resolve(http, cfg, conn, settings: dict, dev, wifi, ip: str, ext_ip: s
                accuracy = EXCLUDED.accuracy, source = EXCLUDED.source, place = EXCLUDED.place,
                fetched_at = EXCLUDED.fetched_at""",
             pip, fix.lat, fix.lon, fix.accuracy, fix.source, fix.place, now)
-    return fix, sig
+    return fix
 
 
 JITTER_MAX = 2000.0       # м: дальше не разбрасываем, даже если точность хуже (место по IP)
@@ -349,27 +360,80 @@ async def send_osmand(http, cfg, dev, fix: Fix, body, ip: str, now: datetime,
         return False
 
 
-async def ensure_traccar_device(http, cfg, hostname: str, user: str) -> bool:
-    """Создаёт устройство в Traccar, если его нет (нужны TRACCAR_API_URL и TRACCAR_TOKEN)."""
+_group_ids: dict[str, int] = {}
+_ensured: dict[str, str] = {}            # uniqueId → группа, уже проверено в этом процессе
+
+
+async def traccar_group(http, cfg, name: str) -> int | None:
+    """Номер группы Traccar по имени; нет такой — создаётся."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    if name in _group_ids:
+        return _group_ids[name]
+    h = {"Authorization": f"Bearer {cfg.traccar_token}"}
+    r = await http.get(cfg.traccar_api_url + "/groups", params={"all": "true"}, headers=h, timeout=10)
+    groups = r.json() if r.status_code == 200 else []
+    for g in groups if isinstance(groups, list) else []:
+        if isinstance(g, dict) and str(g.get("name", "")).strip().lower() == name.lower():
+            _group_ids[name] = int(g["id"])
+            return _group_ids[name]
+    r = await http.post(cfg.traccar_api_url + "/groups", json={"name": name}, headers=h, timeout=10)
+    if r.status_code >= 400:
+        log.warning("traccar: не создал группу %s: HTTP %s %s", name, r.status_code, r.text[:200])
+        return None
+    _group_ids[name] = int(r.json()["id"])
+    log.info("traccar: создана группа %s", name)
+    return _group_ids[name]
+
+
+async def ensure_traccar_device(http, cfg, unique_id: str, user: str = "", group: str = "",
+                                name: str = "", category: str = "") -> bool:
+    """Устройство в Traccar: создаётся, если его нет, и кладётся в группу group (по имени;
+    группа создаётся сама). Уже существующее переносится в эту группу. Проверяется один раз
+    за запуск сервера. Нужны TRACCAR_API_URL и TRACCAR_TOKEN (администратора)."""
     if not (cfg.traccar_api_url and cfg.traccar_token):
         return True        # регистрация вручную или registerUnknown в Traccar
+    if _ensured.get(unique_id) == group:
+        return True
     h = {"Authorization": f"Bearer {cfg.traccar_token}"}
     try:
-        r = await http.get(cfg.traccar_api_url + "/devices", params={"uniqueId": hostname},
-                           headers=h, timeout=10)
-        if r.status_code == 200 and r.json():
+        gid = await traccar_group(http, cfg, group) if group else cfg.traccar_group_id
+        r = await http.get(cfg.traccar_api_url + "/devices",
+                           params={"uniqueId": unique_id, "all": "true"}, headers=h, timeout=10)
+        found = r.json() if r.status_code == 200 else []
+        found = [d for d in found if isinstance(d, dict)] if isinstance(found, list) else []
+        if found:
+            d = found[0]
+            if gid and d.get("groupId") != gid:
+                d["groupId"] = gid
+                r = await http.put(f"{cfg.traccar_api_url}/devices/{d['id']}", json=d, headers=h,
+                                   timeout=10)
+                if r.status_code >= 400:
+                    log.warning("traccar: %s не перенесён в группу %s: HTTP %s", unique_id, group,
+                                r.status_code)
+                    return False
+                log.info("traccar: %s → группа %s", unique_id, group)
+            _ensured[unique_id] = group
             return True
-        name = hostname.split(".")[0]
-        if user:
-            name = f"{name} ({user.split(chr(92))[-1]})"
-        data = {"name": name, "uniqueId": hostname, "category": "laptop"}
-        if cfg.traccar_group_id:
-            data["groupId"] = cfg.traccar_group_id
+        if not name:
+            name = unique_id.split(".")[0] if "." in unique_id and not unique_id[0].isdigit() \
+                else unique_id
+            if user:
+                name = f"{name} ({user.split(chr(92))[-1]})"
+        data = {"name": name[:120], "uniqueId": unique_id}
+        if category:
+            data["category"] = category
+        if gid:
+            data["groupId"] = gid
         r = await http.post(cfg.traccar_api_url + "/devices", json=data, headers=h, timeout=10)
         if r.status_code >= 400:
-            log.warning("traccar: не создал устройство %s: HTTP %s %s", hostname, r.status_code,
+            log.warning("traccar: не создал устройство %s: HTTP %s %s", unique_id, r.status_code,
                         r.text[:200])
-        return r.status_code < 400
-    except httpx.HTTPError as e:
+            return False
+        log.info("traccar: создано устройство %s (%s)", unique_id, group or "без группы")
+        _ensured[unique_id] = group
+        return True
+    except Exception as e:  # noqa: BLE001 — точка важнее устройства в Traccar
         log.warning("traccar api: %s", e)
         return False

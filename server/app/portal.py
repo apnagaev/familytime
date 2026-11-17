@@ -776,10 +776,16 @@ async def settings_save(request: Request):
     if errors:
         return back("/settings", err="Известные адреса, не разобрано: " + "; ".join(errors[:3]))
     phone_ids = [x for x in re.split(r"[\s,;]+", str(form.get("phone_ids", "")).strip()) if x][:100]
+    vpn_prefixes = [x for x in re.split(r"[\s,;]+", str(form.get("vpn_prefixes", "")).strip()) if x][:20]
+    groups = {k: str(form.get(k, "")).strip()[:60]
+              for k in ("traccar_group_pc", "traccar_group_vpn", "traccar_group_phone")}
     async with request.app.state.pool.acquire() as conn:
         s = await db.get_settings(conn)
         await db.set_setting(conn, "jitter", form.get("jitter") == "1", u.username)
         await db.set_setting(conn, "phone_ids", phone_ids, u.username)
+        await db.set_setting(conn, "vpn_prefixes", vpn_prefixes, u.username)
+        for k, v in groups.items():
+            await db.set_setting(conn, k, v, u.username)
         await db.set_setting(conn, "ip_locations", known[:500], u.username)
         await db.set_setting(conn, "location", loc, u.username)
         await db.set_setting(conn, "messages", {**s["messages"], "lost": lost}, u.username)
