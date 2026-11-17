@@ -265,8 +265,8 @@ async def _handle(request: Request) -> Response:
         async with request.app.state.pool.acquire() as conn:
             settings = await db.get_settings(conn)
             fam = await conn.fetchrow(
-                "SELECT id FROM ft_families WHERE $1 = ANY(phone_ids) LIMIT 1", device.lower()) \
-                if device else None
+                "SELECT family_id AS id, name FROM ft_family_devices WHERE unique_id = $1",
+                device.lower()) if device else None
         if fam:
             settings["_family_phones"] = {device.lower()}
         vpn = is_vpn(device, settings.get("vpn_prefixes"))
@@ -278,7 +278,8 @@ async def _handle(request: Request) -> Response:
             fix = await refine(request, settings, point, ip)
         if device and point:
             group = settings.get("traccar_group_vpn" if vpn else "traccar_group_phone") or ""
-            ok = await locator.ensure_traccar_device(http, cfg, device, group=str(group))
+            ok = await locator.ensure_traccar_device(http, cfg, device, group=str(group),
+                                                     name=(fam["name"] if fam else "") or "")
             if ok:          # устройство из списка семьи — на карту её пользователей Traccar
                 async with request.app.state.pool.acquire() as conn:
                     await locator.link_device(http, cfg, conn, device,

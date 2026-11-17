@@ -238,3 +238,19 @@ CREATE TABLE IF NOT EXISTS ft_traccar_links (      -- права, выданны
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (unique_id, user_id)
 );
+
+-- 1.6.1: устройства Traccar семьи — отдельной таблицей, один идентификатор — одна семья.
+-- Родитель только получает новый случайный идентификатор (подключить к чужому телефону
+-- нельзя); существующие идентификаторы привязывает администратор.
+CREATE TABLE IF NOT EXISTS ft_family_devices (
+    unique_id text PRIMARY KEY,
+    family_id bigint NOT NULL REFERENCES ft_families ON DELETE CASCADE,
+    name      text NOT NULL DEFAULT '',
+    added_by  text NOT NULL DEFAULT '',
+    added_at  timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO ft_family_devices (unique_id, family_id, added_by)
+    SELECT DISTINCT ON (lower(x)) lower(x), f.id, 'перенос из 1.6.0'
+    FROM ft_families f, unnest(f.phone_ids) AS x
+    ON CONFLICT (unique_id) DO NOTHING;
+UPDATE ft_families SET phone_ids = '{}' WHERE phone_ids <> '{}';
