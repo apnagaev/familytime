@@ -79,31 +79,27 @@
     </div>
   </form>
   {% set devs = fdevs.get(f.id, []) %}
-  <label class="small block" style="margin-top: 8px">Телефоны и другие устройства семьи</label>
+  <label class="small block" style="margin-top: 8px">Телефоны и устройства VPN семьи</label>
   {% if devs %}
   <table class="small">
-    <tr><th>Название</th><th>Идентификатор</th><th>Добавил</th><th></th></tr>
+    <tr><th>Устройство</th><th>Идентификатор</th><th>Добавил</th><th></th></tr>
     {% for d in devs %}
     <tr><td>{{ d.name or '—' }}</td><td><code>{{ d.unique_id }}</code></td><td>{{ d.added_by }} · {{ d.added_at.astimezone(cfg.tz).strftime('%d.%m.%Y') }}</td>
-      <td><form method="post" action="/family/{{ f.id }}" class="inline" onsubmit="return confirm('Убрать устройство из семьи? Его перестанут видеть на карте пользователи семьи.')"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="device_remove"><input type="hidden" name="unique_id" value="{{ d.unique_id }}"><button class="ghost small">Убрать</button></form></td></tr>
+      <td><form method="post" action="/family/{{ f.id }}" class="inline" onsubmit="return confirm('Убрать устройство из семьи? Оно снова станет личным: его перестанут видеть на карте пользователи семьи.')"><input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="device_remove"><input type="hidden" name="unique_id" value="{{ d.unique_id }}"><button class="ghost small">Убрать</button></form></td></tr>
     {% endfor %}
   </table>
-  {% endif %}
+  {% else %}<p class="small muted">Пока нет — все телефоны и устройства VPN личные.</p>{% endif %}
+  {% if traccar_on %}
+  {% set add = addable.get(f.id, []) %}
+  {% if add %}
   <form method="post" action="/family/{{ f.id }}" class="row" style="margin-top: 6px">
-    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="device_new">
-    <input type="text" name="name" placeholder="название, например «Телефон Вани»" maxlength="60" style="flex: 1; min-width: 200px">
-    <button>Добавить телефон</button>
+    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="device_add">
+    <select name="unique_id">{% for d in add %}<option value="{{ d.uniqueId }}">{{ d.name or d.uniqueId }} ({{ d.uniqueId }})</option>{% endfor %}</select>
+    <button>Добавить в семью</button>
   </form>
-  <p class="hint">FamilyTime выдаст новый идентификатор. В Traccar Client на телефоне: «Идентификатор устройства» — этот номер, «Адрес сервера» — <code>{{ cfg.public_url }}/osmand</code>. Телефон появится на карте пользователей семьи после первой точки. Ввести готовый идентификатор родитель не может: так нельзя подключить к своей карте чужое устройство.</p>
-  {% if user.admin %}
-  <form method="post" action="/family/{{ f.id }}" class="row" style="margin-top: 6px">
-    <input type="hidden" name="csrf" value="{{ user.csrf }}"><input type="hidden" name="section" value="device_bind">
-    <input type="text" name="unique_id" placeholder="готовый идентификатор: 82750699, wg-ivan_ph" maxlength="100" style="font-family: monospace">
-    <input type="text" name="name" placeholder="название" maxlength="60">
-    <button class="ghost">Привязать (администратор)</button>
-  </form>
-  <p class="hint">Только администратор: привязать уже работающее устройство (телефон со старым идентификатором, пир VPN). Убедитесь, что устройство действительно этой семьи — его увидят все её пользователи Traccar.</p>
+  {% else %}<p class="small muted">Добавить нечего: в Traccar у родителей семьи нет других устройств.</p>{% endif %}
   {% endif %}
+  <p class="hint">В список — только устройства, которые в Traccar уже есть хотя бы у одного родителя этой семьи (заводятся в Traccar вручную). Устройство семьи видят на карте все её пользователи Traccar, а его точки FamilyTime обогащает: место из «Известных адресов» (у VPN — по localip/extip и Яндексу), ip и operator. Устройства не из списка остаются личными и проходят через FamilyTime транзитом.</p>
 
   {% if user.admin %}
   <form method="post" action="/family/{{ f.id }}" onsubmit="return confirm('Удалить семью? Дети и компьютеры останутся без семьи.')" style="margin-top: 8px">

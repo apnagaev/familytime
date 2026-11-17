@@ -254,3 +254,18 @@ INSERT INTO ft_family_devices (unique_id, family_id, added_by)
     FROM ft_families f, unnest(f.phone_ids) AS x
     ON CONFLICT (unique_id) DO NOTHING;
 UPDATE ft_families SET phone_ids = '{}' WHERE phone_ids <> '{}';
+
+-- 1.7: устройство Traccar может быть в нескольких семьях; добавить можно только устройство
+-- кого-то из родителей (в Traccar), остальные — личные и идут через /osmand транзитом
+CREATE TABLE IF NOT EXISTS ft_family_traccar (
+    unique_id text NOT NULL,
+    family_id bigint NOT NULL REFERENCES ft_families ON DELETE CASCADE,
+    name      text NOT NULL DEFAULT '',
+    added_by  text NOT NULL DEFAULT '',
+    added_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (unique_id, family_id)
+);
+INSERT INTO ft_family_traccar (unique_id, family_id, name, added_by, added_at)
+    SELECT unique_id, family_id, name, added_by, added_at FROM ft_family_devices
+    ON CONFLICT DO NOTHING;
+DELETE FROM ft_family_devices;

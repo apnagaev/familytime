@@ -6,9 +6,10 @@
 заменяются местом из таблицы — с разбросом в пределах её точности, как у ноутбуков.
 Остальные точки уходят без изменений.
 
-Устройства VPN (идентификатор начинается с префикса из списка «VPN», например wg- от vpngeo)
+С 1.7 обогащаются только устройства, которые есть хотя бы в одной семье (ft_family_traccar),
+остальные идут транзитом. Устройства VPN (префикс из списка «VPN», например wg- от vpngeo)
 приходят с сервера WireGuard; их место считается по extip/localip из самой точки — см.
-refine_vpn. Неизвестные Traccar устройства FamilyTime заводит сам (группы из настроек).
+refine_vpn. Телефоны и устройства VPN FamilyTime в Traccar не создаёт.
 """
 from __future__ import annotations
 
@@ -205,23 +206,14 @@ def _spread(settings: dict, fix) -> tuple[float, float]:
             else (fix.lat, fix.lon))
 
 
-async def refine(request: Request, settings: dict, point: dict | None, ip: str) -> dict | None:
-    """Телефон из списка: место из «Известных адресов» по адресу, с которого он пришёл;
-    None — точку не трогать. Последние точки телефонов видны в общих настройках."""
-    if not point:
-        return None
-    allowed = {x.lower() for x in settings.get("phone_ids", [])} | set(settings.get("_family_phones", ()))
-    if point["id"].lower() not in allowed:
-        return None
+def refine_phone(settings: dict, ip: str) -> dict | None:
+    """Телефон семьи: место из «Известных адресов» по адресу, с которого он пришёл."""
     known = locator.match_known(settings.get("ip_locations", []), ip)
-    out = None
-    if known:
-        lat, lon = _spread(settings, known)
-        out = {"lat": lat, "lon": lon, "accuracy": known.accuracy, "place": known.place,
-               "source": "known-ip"}
-    async with request.app.state.pool.acquire() as conn:
-        await _journal(conn, ip, point["id"], point, (known.place or "известный адрес") if known else "")
-    return out
+    if not known:
+        return None
+    lat, lon = _spread(settings, known)
+    return {"lat": lat, "lon": lon, "accuracy": known.accuracy, "place": known.place,
+            "source": "known-ip"}
 
 
 async def refine_vpn(request: Request, settings: dict, point: dict | None, params: dict,
@@ -237,9 +229,6 @@ async def refine_vpn(request: Request, settings: dict, point: dict | None, param
     async with request.app.state.pool.acquire() as conn:
         if not fix and ext:
             fix = await locator.ip_location(request.app.state.http, request.app.state.cfg, conn, ext)
-        if point:
-            await _journal(conn, ext or local or ip, point["id"], point,
-                           (fix.place or fix.source) if fix else "")
     if not fix:
         return None, ext
     lat, lon = _spread(settings, fix)
@@ -248,6 +237,10 @@ async def refine_vpn(request: Request, settings: dict, point: dict | None, param
 
 
 async def _handle(request: Request) -> Response:
+    """Устройство в какой-нибудь семье — точка обогащается (место, ip, operator) и устройство
+    показывается на карте пользователей этих семей. Остальные — транзитом: в Traccar как есть,
+    только телефонам дописывается их настоящий ip. Устройства телефонов и VPN FamilyTime в
+    Traccar не создаёт — их заводят вручную."""
     cfg = request.app.state.cfg
     http = request.app.state.http
     body = await request.body()
@@ -257,47 +250,44 @@ async def _handle(request: Request) -> Response:
     params = point_params(query, body, ctype)
     device = str(params.get("id") or params.get("deviceid") or "").strip()
     point = parse_point(parse_qs(query), body, ctype)
-    attr_ip = ip
-    op_ip = ip
-    fix = None
-    settings: dict = {}
+    attr_ip, fix, op, vpn, fams = ip, None, "", False, []
     try:
         async with request.app.state.pool.acquire() as conn:
             settings = await db.get_settings(conn)
-            fam = await conn.fetchrow(
-                "SELECT family_id AS id, name FROM ft_family_devices WHERE unique_id = $1",
-                device.lower()) if device else None
-        if fam:
-            settings["_family_phones"] = {device.lower()}
-        vpn = is_vpn(device, settings.get("vpn_prefixes"))
-        if vpn:
-            fix, ext = await refine_vpn(request, settings, point, params, ip)
-            if ext:
-                attr_ip = op_ip = ext
-        else:
-            fix = await refine(request, settings, point, ip)
-        if device and point:
-            group = settings.get("traccar_group_vpn" if vpn else "traccar_group_phone") or ""
-            ok = await locator.ensure_traccar_device(http, cfg, device, group=str(group),
-                                                     name=(fam["name"] if fam else "") or "")
-            if ok:          # устройство из списка семьи — на карту её пользователей Traccar
+            if device:
+                fams = [r["family_id"] for r in await conn.fetch(
+                    "SELECT family_id FROM ft_family_traccar WHERE unique_id = $1", device.lower())]
+            vpn = is_vpn(device, settings.get("vpn_prefixes"))
+            if fams and point:
+                if vpn:
+                    fix, ext = await refine_vpn(request, settings, point, params, ip)
+                    attr_ip = ext or ip
+                else:
+                    fix = refine_phone(settings, ip)
+                op = await locator.operator(http, cfg, conn, attr_ip)
+            if point and device:
+                await _journal(conn, (str(params.get("extip") or "") if vpn else "") or ip, device,
+                               point, ((fix["place"] or fix["source"]) if fix else
+                                       ("" if fams else "транзит")))
+        if fams and device:
+            did = await locator.traccar_device_id(http, cfg, device)
+            if did:
                 async with request.app.state.pool.acquire() as conn:
-                    await locator.link_device(http, cfg, conn, device,
-                                              await locator.family_viewers(conn, fam["id"] if fam else None))
+                    viewers: list[str] = []
+                    for f in fams:
+                        viewers += await locator.family_viewers(conn, f)
+                    await locator.link_device(http, cfg, conn, device, viewers)
     except Exception as e:  # noqa: BLE001 — точка в Traccar важнее
         log.warning("точка %s: %s", device, e)
     if fix:
         acc = locator.traccar_accuracy(fix.get("source", "known-ip"), fix["accuracy"], fix["place"])
         query, body = rewrite(query, body, ctype, fix["lat"], fix["lon"], acc,
                               fix["place"], fix.get("source", "known-ip"))
-    op = ""
-    if point:
-        try:
-            async with request.app.state.pool.acquire() as conn:
-                op = await locator.operator(http, cfg, conn, op_ip)
-        except Exception as e:  # noqa: BLE001 — точка важнее
-            log.info("оператор: %s", e)
-    query, body = set_ip(query, body, ctype, attr_ip, {"operator": op})
+    if fams:
+        query, body = set_ip(query, body, ctype, attr_ip, {"operator": op})
+    elif not vpn:
+        # транзит: только настоящий адрес телефона (иначе Traccar записал бы адрес FamilyTime)
+        query, body = set_ip(query, body, ctype, ip)
     target = cfg.osmand_forward_url or cfg.traccar_osmand_url
     if not target:
         return Response(status_code=503)

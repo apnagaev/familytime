@@ -38,7 +38,7 @@ def env():
     locator._linked.clear()
     locator._users.update(at=float("-inf"), items=[])
     calls = []
-    api = {"groups": [], "devices": {}, "next": 100, "perms": set(),
+    api = {"groups": [], "devices": {}, "next": 100, "perms": set(), "owners": {},
            "users": [{"id": 11, "email": "mom@example.com", "name": "Мама"},
                      {"id": 12, "login": "dad", "email": "dad@other.example"}]}
 
@@ -66,6 +66,10 @@ def env():
                 api["groups"].append(g)
                 return httpx.Response(200, json=g)
             if path == "/api/devices" and req.method == "GET":
+                if "userId" in req.url.params:          # устройства пользователя
+                    u = int(req.url.params["userId"])
+                    return httpx.Response(200, json=[d for k, d in api["devices"].items()
+                                                     if u in api["owners"].get(k, set())])
                 if req.url.params.get("all") == "true":
                     return httpx.Response(200, json=list(api["devices"].values()))
                 # как Traccar: по uniqueId — только устройства, привязанные к владельцу токена
@@ -123,8 +127,7 @@ def login_as(c, user, email=""):
 
 def save_settings(c, t, **extra):
     data = {"csrf": t, "interval_minutes": "15", "lost_interval_minutes": "2", "jitter": "",
-            "phone_ids": "", "vpn_prefixes": "wg-\nvpn_", "traccar_group_pc": "PC",
-            "traccar_group_vpn": "VPN", "traccar_group_phone": "",
+            "vpn_prefixes": "wg-\nvpn_", "traccar_group_pc": "PC",
             "ip_locations": "10.20.30.64/26 55.75 37.61 5 home-lan\n"
                             "95.31.7.19/32 55.75 37.61 5 home-wan\n"
                             "10.20.40.0/24 55.70 37.50 5 dc"}
@@ -136,14 +139,22 @@ def osm(calls):
     return [x for x in calls if x.url.host == "traccar"][-1]
 
 
+def family_device(uid, fid=None):
+    if fid is None:
+        fid = run_sql("INSERT INTO ft_families (name) VALUES ('Семья') RETURNING id", fetch=True)[0]["id"]
+    run_sql("INSERT INTO ft_family_traccar (unique_id, family_id) VALUES ($1, $2)", uid, fid)
+    return fid
+
+
 def test_vpn_points_by_extip_localip(env):
     c, calls, api = env
     t = login(c)
     save_settings(c, t)
     page = c.get("/settings").text
-    assert "vpn_" in page and 'value="VPN"' in page
+    assert "vpn_" in page and 'value="PC"' in page
+    fid = family_device("wg-ap_ph")
+    family_device("vpn_laptop", fid)
     wg = {"X-Real-IP": "10.20.40.5"}        # сервер WireGuard — в «dc», но это не место пира
-    # внутренний адрес в туннеле из известной подсети; смещение и место vpngeo игнорируются
     c.get("/osmand?id=wg-ap_ph&lat=55.0&lon=37.0&accuracy=500&extip=95.31.1.20"
           "&localip=10.20.30.70&source=known-net&place=old&timestamp=1", headers=wg)
     q = osm(calls).url.params
@@ -151,132 +162,110 @@ def test_vpn_points_by_extip_localip(env):
         ("55.750000", "37.610000", "5", "known-ip", "home-lan")
     assert q["ip"] == "95.31.1.20" and q["operator"] == "VPN ISP"
     assert q.get_list("source") == ["known-ip"] and q.get_list("place") == ["home-lan"]
-    # внешний адрес точнее? — самая узкая подсеть из обоих (/32 home-wan шире /26? нет: /32 уже)
+    # самая узкая подсеть из обоих адресов
     c.get("/osmand?id=wg-ap_ph&lat=1&lon=1&extip=95.31.7.19&localip=10.20.30.70", headers=wg)
     assert osm(calls).url.params["place"] == "home-wan"
-    # нет в таблице — Яндекс по extip, месяц из кеша
+    # нет в таблице — Яндекс по extip, месяц из кеша; точность в Traccar — 1 м
     n = len([x for x in calls if x.url.host == "locator.api.maps.yandex.ru"])
     for _ in range(2):
         c.get("/osmand?id=vpn_laptop&lat=1&lon=1&extip=8.8.8.8&localip=10.9.9.9", headers=wg)
     q = osm(calls).url.params
-    assert (q["lat"], q["lon"], q["source"]) == ("59.900000", "30.300000", "yandex-ip")
-    assert q["accuracy"] == "1"                     # город по IP — 1 м, без синего круга
+    assert (q["lat"], q["lon"], q["source"], q["accuracy"]) == ("59.900000", "30.300000", "yandex-ip", "1")
     assert len([x for x in calls if x.url.host == "locator.api.maps.yandex.ru"]) == n + 1
-    row = run_sql("SELECT fetched_at FROM ft_geoip WHERE ip = '8.8.8.8'", fetch=True)
-    assert row and locator.GEOIP_TTL.days == 30
-    # разброс как у компьютеров FamilyTime — в круге точности
+    assert locator.GEOIP_TTL.days == 30
+    # разброс как у компьютеров FamilyTime
     save_settings(c, t, jitter="1")
     c.get("/osmand?id=wg-ap_ph&lat=1&lon=1&extip=95.31.7.19", headers=wg)
     q = osm(calls).url.params
     d = math.hypot((float(q["lat"]) - 55.75) * 111320,
                    (float(q["lon"]) - 37.61) * 111320 * math.cos(math.radians(55.75)))
     assert d <= 5.5
-    # без префикса — обычный телефон: адрес соединения, без подмены
-    c.get("/osmand?id=phone1&lat=1&lon=2&extip=95.31.7.19", headers=wg)
-    q = osm(calls).url.params
-    assert q["lat"] == "1" and q["ip"] == "10.20.40.5"
-
-
-def test_traccar_devices_created_in_groups(env):
-    c, calls, api = env
-    t = login(c)
-    save_settings(c, t)
-    wg = {"X-Real-IP": "10.20.40.5"}
-    c.get("/osmand?id=wg-ap_ph&lat=1&lon=1&extip=95.31.7.19", headers=wg)
-    c.get("/osmand?id=wg-ap_ph&lat=1&lon=1&extip=95.31.7.19", headers=wg)
-    c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
-    groups = {g["name"]: g["id"] for g in api["groups"]}
-    assert set(groups) == {"VPN"}
-    assert api["devices"]["wg-ap_ph"]["groupId"] == groups["VPN"]
-    assert "groupId" not in api["devices"]["82750699"]
-    # повторная точка — без запросов к API (проверено один раз за запуск)
-    dev_calls = [x for x in calls if x.url.host == "tapi" and x.url.path == "/api/devices"]
-    assert len([x for x in dev_calls if x.method == "POST"]) == 2
-    # компьютер с агентом — в группу PC; уже существующий в другой группе — переносится
-    api["devices"]["pc.example.local"] = {"id": 5, "uniqueId": "pc.example.local", "name": "pc",
-                                          "groupId": 99}
-    tok = c.post("/api/agent/enroll", json={"hostname": "pc.example.local", "secret": "enroll"}).json()["token"]
-    c.post("/api/agent/location", headers={"Authorization": f"Bearer {tok}", "X-Real-IP": "10.20.30.70"},
-           json={"wifi": [], "session": "active"})
-    groups = {g["name"]: g["id"] for g in api["groups"]}
-    assert api["devices"]["pc.example.local"]["groupId"] == groups["PC"]
-    assert any(x.method == "PUT" for x in calls if x.url.host == "tapi")
-
-
-def test_unlinked_device_moved_to_group(env):
-    """Устройство заведено не владельцем токена (vpngeo, вручную) — по ?uniqueId= не видно,
-    находится через ?all=true и переносится в группу."""
-    c, calls, api = env
-    t = login(c)
-    save_settings(c, t)
-    api["devices"]["wg-test"] = {"id": 7, "uniqueId": "wg-test", "name": "test", "groupId": 55,
-                                 "_linked": False}
-    c.get("/osmand?id=wg-test&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
-    groups = {g["name"]: g["id"] for g in api["groups"]}
-    assert api["devices"]["wg-test"]["groupId"] == groups["VPN"]
+    # телефоны и VPN FamilyTime в Traccar не создаёт
     assert not any(x.method == "POST" and x.url.path == "/api/devices" for x in calls
                    if x.url.host == "tapi")
 
 
-def test_foreign_group_with_same_name_ignored(env):
-    """На общем Traccar у другого пользователя своя группа «VPN» — устройство в неё не уходит."""
+def test_computers_created_and_grouped(env):
+    """Компьютеры с агентом — создаются в группе PC; существующий (и не привязанный к владельцу
+    токена) переносится; одноимённая чужая группа не берётся; номер группы вместо имени."""
     c, calls, api = env
     t = login(c)
     save_settings(c, t)
-    api["groups"].append({"id": 900, "name": "VPN", "_own": False})
-    c.get("/osmand?id=wg-x&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
-    own = [g for g in api["groups"] if g["name"] == "VPN" and g.get("_own", True)]
-    assert len(own) == 1 and api["devices"]["wg-x"]["groupId"] == own[0]["id"] != 900
-    # номер группы вместо имени
+    api["groups"].append({"id": 900, "name": "PC", "_own": False})
+    api["devices"]["old.example.local"] = {"id": 5, "uniqueId": "old.example.local", "name": "old",
+                                           "groupId": 99, "_linked": False}
+
+    def locate(host):
+        tok = c.post("/api/agent/enroll", json={"hostname": host, "secret": "enroll"}).json()["token"]
+        c.post("/api/agent/location", headers={"Authorization": f"Bearer {tok}",
+                                               "X-Real-IP": "10.20.30.70"},
+               json={"wifi": [], "session": "active"})
+    locate("new.example.local")
+    locate("old.example.local")
+    own = [g for g in api["groups"] if g["name"] == "PC" and g.get("_own", True)]
+    assert len(own) == 1 and own[0]["id"] != 900
+    assert api["devices"]["new.example.local"]["groupId"] == own[0]["id"]
+    assert api["devices"]["new.example.local"]["name"] == "new"
+    assert api["devices"]["old.example.local"]["groupId"] == own[0]["id"]
+    assert len([x for x in calls if x.url.host == "tapi" and x.method == "POST"
+                and x.url.path == "/api/devices"]) == 1
+    # номер группы
     locator._ensured.clear()
-    save_settings(c, t, traccar_group_vpn="900")
-    c.get("/osmand?id=wg-x&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
-    assert api["devices"]["wg-x"]["groupId"] == 900
+    save_settings(c, t, traccar_group_pc="900")
+    locate("new.example.local")
+    assert api["devices"]["new.example.local"]["groupId"] == 900
 
 
-def test_family_devices_on_family_users_map(env):
-    """Компьютеры и телефоны семьи — на карту её пользователей Traccar (права на устройство)."""
+def test_family_devices_only_from_parents(env):
+    """В семью — только устройство Traccar кого-то из родителей; оно — на карту пользователей
+    семьи и обогащается; остальные личные."""
     c, calls, api = env
     t = login(c)
     save_settings(c, t)
-    # мама входила через Keycloak с подтверждённой почтой — её найдём в Traccar по почте
-    c.cookies.clear()
-    c.get("/dev-login?u=mom&parent=1&email=mom@example.com", follow_redirects=False)
-    tm = re.search(r'name="csrf" value="([^"]+)"', c.get("/dashboard").text).group(1)
+    tm = login_as(c, "mom", "mom@example.com")        # мама входила через Keycloak с почтой
     c.post("/children", data={"username": "ivan", "display_name": "Ваня", "csrf": tm})
     fid = run_sql("SELECT id FROM ft_families", fetch=True)[0]["id"]
+    # в Traccar: телефон мамы (её), телефон чужого человека (не её)
+    api["devices"]["82750699"] = {"id": 41, "uniqueId": "82750699", "name": "Телефон мамы"}
+    api["devices"]["99999"] = {"id": 42, "uniqueId": "99999", "name": "Чужой"}
+    api["owners"] = {"82750699": {11}, "99999": {77}}
+    page = c.get("/family").text
+    assert "Телефон мамы (82750699)" in page and "99999" not in page
+    # чужое устройство не добавить, даже подставив идентификатор
+    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_add", "unique_id": "99999"})
+    assert "нет в Traccar ни у одного родителя" in r.text
+    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_add", "unique_id": "82750699"})
+    assert "Сохранено" in r.text and "<code>82750699</code>" in r.text
+    # кому показывать: папа по логину — его права выдаются при точке; телефон обогащается
+    c.post(f"/family/{fid}", data={"csrf": tm, "section": "traccar", "traccar_users": "dad"})
+    c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
+    q = osm(calls).url.params
+    assert q["source"] == "known-ip" and (12, 41) in api["perms"]
+    # чужое — транзитом, никому
+    c.get("/osmand?id=99999&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
+    assert "source" not in osm(calls).url.params and not any(d == 42 for _, d in api["perms"])
+    # компьютер семьи — тоже на карту папы
     tok = c.post("/api/agent/enroll", json={"hostname": "kid.example.local", "secret": "enroll"}).json()["token"]
     run_sql("UPDATE ft_devices SET family_id = $1", fid)
-    h = {"Authorization": f"Bearer {tok}", "X-Real-IP": "10.20.30.70"}
-    c.post("/api/agent/location", headers=h, json={"wifi": [], "session": "active"})
-    did = api["devices"]["kid.example.local"]["id"]
-    assert api["perms"] == {(11, did)}
-    # явный список в семье: папа по логину; маме права забираются
-    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "traccar", "traccar_users": "dad"})
-    assert "Сохранено" in r.text and "Карта Traccar" in r.text
-    c.post("/api/agent/location", headers=h, json={"wifi": [], "session": "active"})
-    assert api["perms"] == {(12, did)}
-    # родитель не может привязать готовый (чужой) идентификатор — только получить новый
-    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_bind", "unique_id": "99999"})
-    assert r.status_code == 403
-    r = c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_new", "name": "Телефон Вани"})
-    phone = re.search(r"Идентификатор для «Телефон Вани»: (\d{12})", r.text).group(1)
-    assert phone in c.get("/family").text
-    # администратор привязывает существующее устройство VPN
+    c.post("/api/agent/location", headers={"Authorization": f"Bearer {tok}", "X-Real-IP": "10.20.30.70"},
+           json={"wifi": [], "session": "active"})
+    assert (12, api["devices"]["kid.example.local"]["id"]) in api["perms"]
+    # убрать из семьи — снова личное: права забираются, точка транзитом
+    c.post(f"/family/{fid}", data={"csrf": tm, "section": "device_remove", "unique_id": "82750699"})
+    c.get("/osmand?id=82750699&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
+    assert "source" not in osm(calls).url.params
+    # администратор: выбор семьи списком на странице «Компьютеры»
     ta = login(c)
-    c.post(f"/family/{fid}", data={"csrf": ta, "section": "device_bind", "unique_id": "wg-ivan_ph",
-                                   "name": "VPN Вани"})
-    c.get(f"/osmand?id={phone}&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
-    c.get("/osmand?id=wg-ivan_ph&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
-    c.get("/osmand?id=99999&lat=1&lon=1", headers={"X-Real-IP": "95.31.1.20"})
-    ph, vpn, other = (api["devices"][k]["id"] for k in (phone, "wg-ivan_ph", "99999"))
-    assert api["devices"][phone]["name"] == "Телефон Вани"
-    assert {(12, ph), (12, vpn)} <= api["perms"] and not any(d == other for _, d in api["perms"])
-    # убрать из семьи — права забираются при следующей точке
-    tm2 = login_as(c, "mom", "mom@example.com")
-    c.post(f"/family/{fid}", data={"csrf": tm2, "section": "device_remove", "unique_id": "wg-ivan_ph"})
-    c.get("/osmand?id=wg-ivan_ph&lat=1&lon=1&extip=95.31.7.19", headers={"X-Real-IP": "10.20.40.5"})
-    assert (12, vpn) not in api["perms"]
-    # телефон семьи получает место из «Известных адресов», как телефоны из общих настроек
-    c.get(f"/osmand?id={phone}&lat=1&lon=1", headers={"X-Real-IP": "10.20.30.70"})
-    assert osm(calls).url.params["source"] == "known-ip"
+    page = c.get("/devices").text
+    assert "Телефоны и устройства VPN" in page and "<code>99999</code>" in page
+    r = c.post("/devices/osmand", data={"csrf": ta, "unique_id": "99999", "family_id": str(fid)})
+    assert "Сохранено" in r.text
+    assert run_sql("SELECT family_id FROM ft_family_traccar WHERE unique_id='99999'", fetch=True)
+    c.post("/devices/osmand", data={"csrf": ta, "unique_id": "99999", "family_id": str(fid),
+                                    "action": "remove"})
+    assert not run_sql("SELECT 1 FROM ft_family_traccar WHERE unique_id='99999'", fetch=True)
+    # одно устройство может быть в нескольких семьях
+    fid2 = run_sql("INSERT INTO ft_families (name) VALUES ('Другая') RETURNING id", fetch=True)[0]["id"]
+    for f in (fid, fid2):
+        c.post("/devices/osmand", data={"csrf": ta, "unique_id": "99999", "family_id": str(f)})
+    assert len(run_sql("SELECT 1 FROM ft_family_traccar WHERE unique_id='99999'", fetch=True)) == 2
