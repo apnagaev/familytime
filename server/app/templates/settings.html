@@ -21,12 +21,7 @@
     <p class="hint">Телефоны шлют точки на <code>{{ cfg.public_url }}/osmand</code>, FamilyTime пересылает их в Traccar. Если телефон есть в этом списке и точка пришла с адреса из «Известных адресов», её координаты заменяются местом из таблицы — с разбросом в пределах точности, как у компьютеров (атрибуты <code>source=known-ip</code> и <code>place</code>). С других адресов и от телефонов не из списка точки уходят как есть. Компьютеры по телефонам не уточняются.</p>
     <label class="block small">Идентификаторы телефонов (как в Traccar Client), по одному на строке</label>
     <textarea name="phone_ids" style="min-height: 70px; font-family: monospace">{{ s.phone_ids|join('\n') }}</textarea>
-    {% if phones %}
-    <table class="small" style="margin-top: 8px">
-      <tr><th>Устройство</th><th>Адрес</th><th>Место</th><th class="num">Точек за сутки</th><th>Последняя</th></tr>
-      {% for p in phones %}<tr><td>{{ p.device }}</td><td>{{ p.net }}</td><td>{{ p.place or '—' }}</td><td class="num">{{ p.n }}</td><td>{{ p.at.astimezone(cfg.tz).strftime('%d.%m %H:%M') }}</td></tr>{% endfor %}
-    </table>
-    {% endif %}
+    <p class="small">{% if points_devices %}<a href="/settings/points" target="_blank" rel="noopener">Журнал точек за сутки</a> — {{ points_devices }} устр.: с каких адресов приходили точки телефонов и устройств VPN и какое место им подставлено.{% else %}Журнал точек за сутки пуст.{% endif %}</p>
 
     <h2 style="margin-top: 18px">Устройства VPN (vpngeo)</h2>
     <p class="hint">Точки устройств, чей идентификатор начинается с одного из этих префиксов, приходят на <code>/osmand</code> с сервера WireGuard. Их место FamilyTime определяет по адресам из самой точки: <code>localip</code> (адрес в туннеле) и <code>extip</code> (внешний адрес подключения) — по «Известным адресам», иначе Яндекс Локатор по <code>extip</code>, иначе город по IP. Место по IP хранится месяц. Смещение, сделанное отправителем, не учитывается — разброс как у компьютеров. В точку пишутся <code>ip</code> и <code>operator</code> по <code>extip</code>.</p>

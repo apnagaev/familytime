@@ -191,9 +191,12 @@ def test_traccar_client_points(env):
     d = math.hypot((float(q["lat"]) - 55.75) * 111320,
                    (float(q["lon"]) - 37.61) * 111320 * math.cos(math.radians(55.75)))
     assert d <= 41
-    # журнал в настройках; компьютеры по телефонам не уточняются
+    # журнал — отдельной страницей, в настройках только ссылка; компьютеры по телефонам не уточняются
     page = c.get("/settings").text
+    assert 'href="/settings/points"' in page and "<td>my-phone</td>" not in page
+    page = c.get("/settings/points").text
     assert "my-phone" in page and "stranger" not in page and "Дом" in page
+    assert "my-phone" not in c.get("/settings/points?q=nothing").text
     h = enroll(c)
     r = c.post("/api/agent/location", headers={**h, "X-Real-IP": "10.20.30.88"}, json={
         "wifi": [], "session": "active"}).json()
@@ -606,3 +609,10 @@ def test_operator_attribute(env):
     # служба не знает адрес — атрибута нет, точка уходит
     c.get("/osmand?id=ph&lat=1&lon=2", headers={"X-Real-IP": "1.2.3.4"})
     assert "operator" not in osm().url.params and osm().url.params["ip"] == "1.2.3.4"
+
+
+def test_traccar_accuracy_for_ip_locations():
+    t = locator.traccar_accuracy
+    assert t("yandex-wifi", 25) == 25 and t("known-ip", 40, "Дом") == 40
+    assert t("geoip", 10000, "Москва") == 1 and t("geoip", 10000, "") == 2
+    assert t("yandex-ip", 8000) == 1 and t("yandex-ip", 400000) == 2

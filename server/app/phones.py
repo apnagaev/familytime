@@ -277,7 +277,8 @@ async def _handle(request: Request) -> Response:
     except Exception as e:  # noqa: BLE001 — точка в Traccar важнее
         log.warning("точка %s: %s", device, e)
     if fix:
-        query, body = rewrite(query, body, ctype, fix["lat"], fix["lon"], fix["accuracy"],
+        acc = locator.traccar_accuracy(fix.get("source", "known-ip"), fix["accuracy"], fix["place"])
+        query, body = rewrite(query, body, ctype, fix["lat"], fix["lon"], acc,
                               fix["place"], fix.get("source", "known-ip"))
     op = ""
     if point:
