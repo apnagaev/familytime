@@ -57,6 +57,10 @@ DEFAULT_SETTINGS: dict = {
     "auto_update": True,
     "trusted_ca": [],             # доп. центры сертификации: установщику и агентам (trust.py)          # агенты 1.4+ ставят загруженную версию сами
     "jitter": True,               # разброс точек в Traccar в пределах точности
+    "vpn_prefixes": ["wg-"],      # точки устройств VPN (vpngeo): место по extip/localip
+    "traccar_group_pc": "PC",     # группы Traccar для устройств, которые заводит FamilyTime
+    "traccar_group_vpn": "VPN",
+    "traccar_group_phone": "",
     "phone_ids": [],              # Traccar Client: точки с известных адресов ставятся на их место
 }
 
